@@ -87,6 +87,7 @@ function ProfileContent({
   const modelUsage = selectProfileModelUsage(stats, tokenStats);
   const peakHourLabel = formatPeakHourLabel(stats.activeHours.startHour);
   const mostWorkedProjectLabel = formatMostWorkedProjectLabel(stats.mostWorkedProject);
+  const includesEstimatedTokens = (tokenStats?.estimatedProviders?.length ?? 0) > 0;
 
   return (
     <div className="flex min-w-0 flex-col gap-7">
@@ -126,11 +127,11 @@ function ProfileContent({
       {/* Stat tiles */}
       <div className="grid grid-cols-2 divide-x divide-y divide-border/50 overflow-hidden rounded-2xl border border-border/60 sm:grid-cols-3 lg:grid-cols-5 lg:divide-y-0">
         <StatTile
-          label="Lifetime tokens"
+          label={includesEstimatedTokens ? "Lifetime tokens (est.)" : "Lifetime tokens"}
           value={tokensPending ? null : formatCompact(tokenStats?.lifetimeTotalTokens ?? null)}
         />
         <StatTile
-          label="Peak day"
+          label={includesEstimatedTokens ? "Peak day (est.)" : "Peak day"}
           value={tokensPending ? null : formatCompact(tokenStats?.peakDayTokens ?? null)}
         />
         <StatTile label="Total prompts" value={formatNumber(stats.activity.totalPromptsSent)} />

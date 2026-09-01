@@ -337,7 +337,7 @@ describe("ProfileStatsArchive", () => {
     ]);
   });
 
-  it("computes cumulative deltas across agent turns before excluding their usage", () => {
+  it("retains cumulative token deltas from agent-dispatched turns", () => {
     const rows = aggregateThreadTokenRows([
       {
         totalProcessedTokens: 1_000,
@@ -367,6 +367,7 @@ describe("ProfileStatsArchive", () => {
 
     expect(rows.map(({ createdAt, tokens }) => ({ createdAt, tokens }))).toEqual([
       { createdAt: "2026-06-13T12:00:00.000Z", tokens: 1_000 },
+      { createdAt: "2026-06-13T12:01:00.000Z", tokens: 1_500 },
       { createdAt: "2026-06-13T12:02:00.000Z", tokens: 500 },
     ]);
   });

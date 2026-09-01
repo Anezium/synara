@@ -378,6 +378,9 @@ function buildContextWindowActivityPayload(
     return undefined;
   }
   const usage = event.payload.usage;
+  if (usage.reporting === "not-reported") {
+    return toActivityPayload({ reporting: "not-reported", provider: event.provider });
+  }
   const hasTokenUsage = usage.usedTokens > 0;
   const hasPercentUsage =
     typeof usage.usedPercent === "number" && Number.isFinite(usage.usedPercent);

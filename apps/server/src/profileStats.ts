@@ -84,6 +84,7 @@ interface TokenDayRow {
   readonly day: string | null;
   readonly provider: string | null;
   readonly model: string | null;
+  readonly reporting: string | null;
   readonly tokens: number;
 }
 
@@ -451,6 +452,7 @@ interface TokenActivityAggregate {
   readonly tokensByDay: Map<string, number>;
   readonly tokensByProvider: Map<ProviderKind, number>;
   readonly tokensByProviderModel: Map<string, TokenModelUsageCount>;
+  readonly estimatedProviders: Set<ProviderKind>;
   readonly lifetime: number;
 }
 
@@ -458,6 +460,7 @@ function aggregateTokenActivity(rows: ReadonlyArray<TokenDayRow>): TokenActivity
   const tokensByDay = new Map<string, number>();
   const tokensByProvider = new Map<ProviderKind, number>();
   const tokensByProviderModel = new Map<string, TokenModelUsageCount>();
+  const estimatedProviders = new Set<ProviderKind>();
   let lifetime = 0;
   for (const row of rows) {
     const day = nonEmptyString(row.day);
@@ -470,6 +473,9 @@ function aggregateTokenActivity(rows: ReadonlyArray<TokenDayRow>): TokenActivity
     const provider = normalizeProviderKind(row.provider);
     if (provider !== "unknown") {
       tokensByProvider.set(provider, (tokensByProvider.get(provider) ?? 0) + tokens);
+      if (row.reporting === "estimated") {
+        estimatedProviders.add(provider);
+      }
     }
     const model = nonEmptyString(row.model) ?? "unknown";
     const providerModelKey = `${provider}\u0000${model}`;
@@ -480,7 +486,7 @@ function aggregateTokenActivity(rows: ReadonlyArray<TokenDayRow>): TokenActivity
       tokensByProviderModel.set(providerModelKey, { provider, model, tokens });
     }
   }
-  return { tokensByDay, tokensByProvider, tokensByProviderModel, lifetime };
+  return { tokensByDay, tokensByProvider, tokensByProviderModel, estimatedProviders, lifetime };
 }
 
 function computeStreaks(
@@ -743,6 +749,7 @@ const makeProfileStatsQuery = Effect.gen(function* () {
             ) AS model,
             CAST(json_extract(a.payload_json, '$.totalProcessedTokens') AS INTEGER) AS tp,
             CAST(json_extract(a.payload_json, '$.usedTokens') AS INTEGER) AS ut,
+            COALESCE(json_extract(a.payload_json, '$.reporting'), 'exact') AS reporting,
             pm.dispatch_origin AS dispatch_origin,
             a.sequence AS sequence,
             a.created_at AS created_at,
@@ -759,10 +766,19 @@ const makeProfileStatsQuery = Effect.gen(function* () {
             ON pm.thread_id = pt.thread_id
            AND pm.message_id = pt.pending_message_id
           WHERE a.kind = 'context-window.updated'
-            AND COALESCE(
-              json_extract(a.payload_json, '$.totalProcessedTokens'),
-              json_extract(a.payload_json, '$.usedTokens')
-            ) IS NOT NULL
+            AND (
+              (
+                COALESCE(json_extract(a.payload_json, '$.reporting'), 'exact') = 'exact'
+                AND COALESCE(
+                  json_extract(a.payload_json, '$.totalProcessedTokens'),
+                  json_extract(a.payload_json, '$.usedTokens')
+                ) IS NOT NULL
+              )
+              OR (
+                json_extract(a.payload_json, '$.reporting') = 'estimated'
+                AND json_extract(a.payload_json, '$.totalProcessedTokens') IS NOT NULL
+              )
+            )
         ),
         provider_model_scale AS (
           SELECT thread_id, provider, model, MAX(tp IS NOT NULL) AS has_cumulative
@@ -776,6 +792,7 @@ const makeProfileStatsQuery = Effect.gen(function* () {
             model,
             thread_id,
             tp AS tot,
+            reporting,
             dispatch_origin,
             sequence,
             created_at,
@@ -788,6 +805,7 @@ const makeProfileStatsQuery = Effect.gen(function* () {
             day,
             provider,
             model,
+            reporting,
             dispatch_origin,
             CASE
               WHEN previous_tot IS NULL OR tot < previous_tot THEN tot
@@ -798,6 +816,7 @@ const makeProfileStatsQuery = Effect.gen(function* () {
               day,
               provider,
               model,
+              reporting,
               dispatch_origin,
               tot,
               LAG(tot) OVER (
@@ -818,6 +837,7 @@ const makeProfileStatsQuery = Effect.gen(function* () {
             ev.model AS model,
             ev.thread_id AS thread_id,
             ev.ut AS tot,
+            ev.reporting AS reporting,
             ev.dispatch_origin AS dispatch_origin,
             ev.sequence AS sequence,
             ev.created_at AS created_at,
@@ -836,6 +856,7 @@ const makeProfileStatsQuery = Effect.gen(function* () {
             day,
             provider,
             model,
+            reporting,
             dispatch_origin,
             CASE
               WHEN previous_tot IS NULL THEN tot
@@ -849,6 +870,7 @@ const makeProfileStatsQuery = Effect.gen(function* () {
               day,
               provider,
               model,
+              reporting,
               dispatch_origin,
               tot,
               LAG(tot) OVER (
@@ -878,23 +900,51 @@ const makeProfileStatsQuery = Effect.gen(function* () {
             FROM used_only_kept
           )
         ),
+        telemetry_threads AS (
+          SELECT DISTINCT thread_id FROM ev
+        ),
+        estimated_message_tokens AS (
+          SELECT
+            STRFTIME('%Y-%m-%d', DATETIME(m.created_at, ${tz})) AS day,
+            COALESCE(
+              s.provider_name,
+              json_extract(th.model_selection_json, '$.provider'),
+              'unknown'
+            ) AS provider,
+            COALESCE(json_extract(th.model_selection_json, '$.model'), 'unknown') AS model,
+            'estimated' AS reporting,
+            SUM(MAX(1, CAST((LENGTH(m.text) + 3) / 4 AS INTEGER))) AS d
+          FROM projection_thread_messages m
+          JOIN projection_threads th ON th.thread_id = m.thread_id
+          LEFT JOIN projection_thread_sessions s ON s.thread_id = m.thread_id
+          LEFT JOIN telemetry_threads te ON te.thread_id = m.thread_id
+          WHERE te.thread_id IS NULL
+            AND COALESCE(
+              s.provider_name,
+              json_extract(th.model_selection_json, '$.provider')
+            ) IN ('cursor', 'antigravity')
+            AND m.role IN ('user', 'assistant')
+            AND LENGTH(TRIM(m.text)) > 0
+          GROUP BY day, provider, model
+        ),
         all_tokens AS (
-          SELECT day, provider, model, d FROM cumulative_delta
-          WHERE dispatch_origin IS NULL OR dispatch_origin = 'user'
+          SELECT day, provider, model, reporting, d FROM cumulative_delta
           UNION ALL
-          SELECT day, provider, model, d FROM used_only_delta
-          WHERE dispatch_origin IS NULL OR dispatch_origin = 'user'
+          SELECT day, provider, model, reporting, d FROM used_only_delta
+          UNION ALL
+          SELECT day, provider, model, reporting, d FROM estimated_message_tokens
           UNION ALL
           SELECT
             STRFTIME('%Y-%m-%d', DATETIME(a.created_at, ${tz})) AS day,
             COALESCE(a.provider, 'unknown') AS provider,
             COALESCE(a.model, 'unknown') AS model,
+            'exact' AS reporting,
             a.tokens AS d
           FROM profile_stats_deleted_tokens a
         )
-        SELECT day, provider, model, SUM(d) AS tokens
+        SELECT day, provider, model, reporting, SUM(d) AS tokens
         FROM all_tokens
-        GROUP BY day, provider, model
+        GROUP BY day, provider, model, reporting
       `,
     );
 
@@ -1271,7 +1321,7 @@ const makeProfileStatsQuery = Effect.gen(function* () {
       const todayKey = localToday(input.utcOffsetMinutes);
       const rows = yield* queryTokenActivity(tz);
       const turnInsightRows = yield* queryTurnInsights();
-      const { tokensByDay, tokensByProvider, tokensByProviderModel, lifetime } =
+      const { tokensByDay, tokensByProvider, tokensByProviderModel, estimatedProviders, lifetime } =
         aggregateTokenActivity(rows);
 
       let peakDay: string | null = null;
@@ -1340,6 +1390,7 @@ const makeProfileStatsQuery = Effect.gen(function* () {
         peakDayTokens,
         peakDay,
         providers,
+        estimatedProviders: [...estimatedProviders].toSorted(),
         unavailableProviders,
         topProvider,
         topProviderPercent,

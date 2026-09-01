@@ -1536,4 +1536,222 @@ describe("ProfileStatsQuery", () => {
       }),
     );
   });
+
+  it("includes explicit estimates but excludes not-reported token rows", async () => {
+    await runProfileStatsTest(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const statsQuery = yield* ProfileStatsQuery;
+
+        yield* sql`
+          INSERT INTO projection_threads (
+            thread_id,
+            project_id,
+            title,
+            model_selection_json,
+            runtime_mode,
+            interaction_mode,
+            env_mode,
+            created_at,
+            updated_at,
+            deleted_at
+          )
+          VALUES
+            (
+              'thread-claude-exact',
+              'project-profile',
+              'Claude Exact',
+              '{"provider":"claudeAgent","model":"claude-sonnet-4-6"}',
+              'full-access',
+              'default',
+              'local',
+              '2026-06-15T09:00:00.000Z',
+              '2026-06-15T09:00:00.000Z',
+              NULL
+            ),
+            (
+              'thread-antigravity-missing',
+              'project-profile',
+              'Antigravity Missing',
+              '{"provider":"antigravity","model":"gemini-3.5-flash"}',
+              'full-access',
+              'default',
+              'local',
+              '2026-06-15T10:00:00.000Z',
+              '2026-06-15T10:00:00.000Z',
+              NULL
+            ),
+            (
+              'thread-cursor-estimated',
+              'project-profile',
+              'Cursor Estimated',
+              '{"provider":"cursor","model":"composer-1"}',
+              'full-access',
+              'default',
+              'local',
+              '2026-06-15T11:00:00.000Z',
+              '2026-06-15T11:00:00.000Z',
+              NULL
+            )
+        `;
+
+        yield* sql`
+          INSERT INTO orchestration_events (
+            event_id,
+            aggregate_kind,
+            stream_id,
+            stream_version,
+            event_type,
+            occurred_at,
+            actor_kind,
+            payload_json,
+            metadata_json
+          )
+          VALUES
+            (
+              'event-claude-exact-1',
+              'thread',
+              'thread-claude-exact',
+              1,
+              'thread.turn-start-requested',
+              '2026-06-15T09:05:00.000Z',
+              'client',
+              '{"threadId":"thread-claude-exact","modelSelection":{"provider":"claudeAgent","model":"claude-sonnet-4-6"}}',
+              '{}'
+            ),
+            (
+              'event-antigravity-missing-1',
+              'thread',
+              'thread-antigravity-missing',
+              1,
+              'thread.turn-start-requested',
+              '2026-06-15T10:05:00.000Z',
+              'client',
+              '{"threadId":"thread-antigravity-missing","modelSelection":{"provider":"antigravity","model":"gemini-3.5-flash"}}',
+              '{}'
+            ),
+            (
+              'event-cursor-estimated-1',
+              'thread',
+              'thread-cursor-estimated',
+              1,
+              'thread.turn-start-requested',
+              '2026-06-15T11:05:00.000Z',
+              'client',
+              '{"threadId":"thread-cursor-estimated","modelSelection":{"provider":"cursor","model":"composer-1"}}',
+              '{}'
+            )
+        `;
+
+        yield* sql`
+          INSERT INTO projection_thread_activities (
+            activity_id,
+            thread_id,
+            turn_id,
+            tone,
+            kind,
+            summary,
+            payload_json,
+            sequence,
+            created_at
+          )
+          VALUES
+            (
+              'activity-claude-exact',
+              'thread-claude-exact',
+              'turn-claude-exact',
+              'info',
+              'context-window.updated',
+              'tokens updated',
+              '{"totalProcessedTokens":4000,"reporting":"exact","provider":"claudeAgent"}',
+              1,
+              '2026-06-15T09:06:00.000Z'
+            ),
+            (
+              'activity-antigravity-missing',
+              'thread-antigravity-missing',
+              'turn-antigravity-missing',
+              'info',
+              'context-window.updated',
+              'tokens updated',
+              '{"reporting":"not-reported","provider":"antigravity"}',
+              1,
+              '2026-06-15T10:06:00.000Z'
+            ),
+            (
+              'activity-cursor-estimated',
+              'thread-cursor-estimated',
+              'turn-cursor-estimated',
+              'info',
+              'context-window.updated',
+              'tokens updated',
+              '{"totalProcessedTokens":9999,"reporting":"estimated","provider":"cursor"}',
+              1,
+              '2026-06-15T11:06:00.000Z'
+            )
+        `;
+
+        // Antigravity explicitly reported no counters. Its agent-dispatched
+        // transcript remains available, so the profile uses the documented
+        // four-characters-per-token local estimate instead of dropping it.
+        yield* sql`
+          INSERT INTO projection_thread_messages (
+            message_id,
+            thread_id,
+            role,
+            text,
+            is_streaming,
+            created_at,
+            updated_at,
+            source,
+            dispatch_origin,
+            sequence
+          )
+          VALUES
+            (
+              'message-antigravity-user',
+              'thread-antigravity-missing',
+              'user',
+              '12345678',
+              0,
+              '2026-06-15T10:05:00.000Z',
+              '2026-06-15T10:05:00.000Z',
+              'native',
+              'agent',
+              1
+            ),
+            (
+              'message-antigravity-assistant',
+              'thread-antigravity-missing',
+              'assistant',
+              '123456789012',
+              0,
+              '2026-06-15T10:06:00.000Z',
+              '2026-06-15T10:06:00.000Z',
+              'native',
+              NULL,
+              2
+            )
+        `;
+
+        const tokenStats = yield* statsQuery.getProfileTokenStats({ utcOffsetMinutes: 0 });
+
+        expect(tokenStats.available).toBe(true);
+        expect(tokenStats.lifetimeTotalTokens).toBe(14_004);
+        expect(tokenStats.providers).toEqual(["cursor", "claudeAgent", "antigravity"]);
+        expect(tokenStats.estimatedProviders).toEqual(["antigravity", "cursor"]);
+        expect(tokenStats.unavailableProviders).toEqual([]);
+        expect(tokenStats.models).toEqual([
+          { provider: "cursor", model: "composer-1", tokens: 9999, percent: 71.4 },
+          {
+            provider: "claudeAgent",
+            model: "claude-sonnet-4-6",
+            tokens: 4000,
+            percent: 28.6,
+          },
+          { provider: "antigravity", model: "gemini-3.5-flash", tokens: 5, percent: 0 },
+        ]);
+      }),
+    );
+  });
 });

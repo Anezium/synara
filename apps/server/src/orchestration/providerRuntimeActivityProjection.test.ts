@@ -622,6 +622,24 @@ describe("provider runtime activity projection", () => {
       },
     });
 
+    const [notReportedUsage] = projectProviderRuntimeActivities(
+      runtimeEvent({
+        type: "thread.token-usage.updated",
+        eventId: "context-usage-not-reported",
+        provider: "antigravity",
+        payload: { usage: { usedTokens: 0, reporting: "not-reported" } },
+      }),
+    );
+    expect(notReportedUsage).toMatchObject({
+      kind: "context-window.updated",
+      payload: {
+        reporting: "not-reported",
+        provider: "antigravity",
+      },
+    });
+    expect(notReportedUsage?.payload).not.toHaveProperty("usedTokens");
+    expect(notReportedUsage?.payload).not.toHaveProperty("totalProcessedTokens");
+
     const [configured] = projectProviderRuntimeActivities(
       runtimeEvent({
         type: "session.configured",

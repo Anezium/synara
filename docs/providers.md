@@ -35,6 +35,12 @@ Synara provides the shared operating surface around each provider:
 - Provider handoffs
 - Usage information where the provider exposes it
 
+Profile token totals also include threads dispatched by another Synara agent. When Cursor or
+Antigravity omits processed-token counters, Synara uses a conservative four-characters-per-token
+estimate over the stored user and assistant transcript, and marks the affected profile totals as
+estimated. Provider-reported counters always take precedence; hidden system prompts, cache traffic,
+and private reasoning remain unavailable to this fallback.
+
 ## What remains provider-owned
 
 The provider still controls:
@@ -96,6 +102,25 @@ The session may preserve provider-specific behavior such as:
 - Provider-native subagents or workflows
 
 Capabilities vary. Do not assume a control available for one provider exists for all of them.
+
+## Token usage
+
+Synara records per-thread token consumption only from provider-reported telemetry. It does not
+invent exact counts when a provider omits them, and it does not mix account quota into thread spend.
+
+- **Context occupancy** comes from ACP `usage_update` (`used` / `size`) and drives the context
+  meter. Occupancy is not a processed-token total.
+- **Processed tokens** (`input` / `output` / `cached` / `reasoning` / `total`) come from Cursor
+  `session/prompt` results when present, and from Antigravity transcript steps, capture hooks, and
+  CLI print JSON. Antigravity's step counters are explicitly treated as per-turn. For ACP
+  payloads whose scale is not declared, Synara keeps the processed total estimated until a
+  decrease proves per-turn semantics; monotonic growth alone is never treated as proof of a
+  cumulative counter.
+- **Missing telemetry** is not stored as an exact zero. Cursor threads without usage payloads stay
+  out of token rankings (`unavailableProviders`). Antigravity completed turns without counters are
+  marked `not-reported` and excluded from profile totals.
+- **Account quota** (Cursor Dashboard, Google Code Assist) remains a separate provider-usage
+  snapshot and is never added into per-thread consumption.
 
 ## Switching providers
 

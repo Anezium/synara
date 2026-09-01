@@ -310,11 +310,7 @@ export function aggregateThreadTokenRows(
         ? total
         : Math.max(0, total - previousCumulativeTotal);
     previousCumulativeTotal = total;
-    if (
-      delta <= 0 ||
-      row.createdAt === null ||
-      (row.dispatchOrigin != null && row.dispatchOrigin !== "user")
-    ) {
+    if (delta <= 0 || row.createdAt === null) {
       continue;
     }
     const { provider, model } = resolveTokenProviderModel(row, fallbackSelection);
@@ -345,11 +341,7 @@ export function aggregateThreadTokenRows(
         : Math.max(0, total - previousUsedTotal);
     previousUsedTotal = total;
     previousUsedProviderModelKey = providerModelKey;
-    if (
-      delta <= 0 ||
-      row.createdAt === null ||
-      (row.dispatchOrigin != null && row.dispatchOrigin !== "user")
-    ) {
+    if (delta <= 0 || row.createdAt === null) {
       continue;
     }
     addTokenSnapshotRow(tokensByKey, {
@@ -633,6 +625,7 @@ const makeProfileStatsArchive = Effect.gen(function* () {
          AND pm.message_id = pt.pending_message_id
         WHERE a.thread_id = ${threadId}
           AND a.kind = 'context-window.updated'
+          AND COALESCE(json_extract(a.payload_json, '$.reporting'), 'exact') = 'exact'
           AND COALESCE(
             json_extract(a.payload_json, '$.totalProcessedTokens'),
             json_extract(a.payload_json, '$.usedTokens')
