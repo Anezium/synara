@@ -64,6 +64,10 @@ import {
   type SizedProviderRuntimeEvent,
 } from "../providerRuntimeEventIngress.ts";
 import { teardownChildProcessTree } from "../supervisedProcessTeardown.ts";
+import {
+  createAntigravityTokenUsageTracker,
+  type AntigravityTokenUsageTracker,
+} from "../antigravityTokenUsage.ts";
 
 const PROVIDER = "antigravity" as const;
 const DEFAULT_MODEL = "Gemini 3.5 Flash";
@@ -140,6 +144,7 @@ type AntigravitySessionContext = ToolSurfaceCounters & {
   processedTranscriptBytes: number;
   processedTranscriptPath?: string | undefined;
   processedSteps: Set<number>;
+  tokenUsage: AntigravityTokenUsageTracker;
   pendingTools: PendingTool[];
   nextToolSequence: number;
   pendingBackgroundTasks: Map<string, AntigravityTrackedBackgroundTask>;
@@ -306,6 +311,35 @@ process.stdin.on("end", () => {
       if (typeof input[key] === "string" && input[key].trim()) sanitized[key] = input[key];
     }
     if (Number.isInteger(input.stepIdx) && input.stepIdx >= 0) sanitized.stepIdx = input.stepIdx;
+    const usageKeys = ["usage", "usageMetadata", "usage_metadata", "tokenUsage", "token_usage"];
+    for (const key of usageKeys) {
+      const nested = input[key];
+      if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+        const usage = {};
+        for (const [field, value] of Object.entries(nested)) {
+          if (typeof value === "number" && Number.isFinite(value) && value >= 0) usage[field] = value;
+        }
+        if (Object.keys(usage).length > 0) sanitized.usage = usage;
+        break;
+      }
+    }
+    if (!sanitized.usage) {
+      const usage = {};
+      for (const key of [
+        "promptTokenCount",
+        "candidatesTokenCount",
+        "totalTokenCount",
+        "cachedContentTokenCount",
+        "thoughtsTokenCount",
+        "inputTokens",
+        "outputTokens",
+        "totalTokens",
+      ]) {
+        const value = input[key];
+        if (typeof value === "number" && Number.isFinite(value) && value >= 0) usage[key] = value;
+      }
+      if (Object.keys(usage).length > 0) sanitized.usage = usage;
+    }
     if (event === "pre-tool") {
       const name = input.toolCall && typeof input.toolCall.name === "string"
         ? input.toolCall.name.trim()
@@ -1235,6 +1269,7 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
       if (context.turnTerminalEmitted || context.activeTurnId === undefined) {
         return false;
       }
+      const usageBase = base(context);
       const completionBase = base(context);
       completePendingBackgroundTasks(
         context,
@@ -1256,6 +1291,13 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
       context.turnTerminalEmitted = true;
       delete context.activeProcess;
       delete context.activeTurnId;
+      const usage = context.tokenUsage.finalizeTurn();
+      offer({
+        ...usageBase,
+        type: "thread.token-usage.updated",
+        payload: { usage },
+        raw: raw("token-usage", { reporting: usage.reporting ?? "exact" }),
+      } satisfies ProviderRuntimeEvent);
       const {
         activeTurnId: _activeTurnId,
         lastError: _lastError,
@@ -1391,6 +1433,10 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
     const processTranscriptStep = (context: AntigravitySessionContext, step: TranscriptStep) => {
       if (context.stopped) return;
       const stepIndex = step.step_index;
+      context.tokenUsage.observe(
+        step,
+        typeof stepIndex === "number" ? `step:${String(stepIndex)}` : undefined,
+      );
       if (typeof stepIndex === "number") {
         if (context.processedSteps.has(stepIndex)) return;
         context.processedSteps.add(stepIndex);
@@ -1748,6 +1794,10 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
           payload.stepIdx >= 0
             ? payload.stepIdx
             : undefined;
+        context.tokenUsage.observe(
+          payload,
+          stepIndex !== undefined ? `step:${String(stepIndex)}` : `hook:${eventName}`,
+        );
         if (eventName === "pre-tool" && stepIndex !== undefined) {
           const toolCall =
             payload.toolCall && typeof payload.toolCall === "object"
@@ -1985,6 +2035,7 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
           processedHookBytes: 0,
           processedTranscriptBytes: 0,
           processedSteps: new Set(),
+          tokenUsage: createAntigravityTokenUsageTracker(),
           pendingTools: [],
           nextToolSequence: 0,
           pendingBackgroundTasks: new Map(),
@@ -2111,6 +2162,7 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
         context.eventFile = eventFile;
         context.processedHookBytes = 0;
         context.processedSteps.clear();
+        context.tokenUsage.startTurn();
         yield* Effect.promise(() => markExistingTranscriptStepsProcessed(context));
         context.pendingTools = [];
         context.pendingAnonymousBackgroundTasks = 0;
@@ -2254,6 +2306,7 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
                 "assistant_text",
               );
             }
+            context.tokenUsage.observeStdout(stdout);
             if (context.turnTerminalEmitted) {
               if (context.activeProcess === child) delete context.activeProcess;
               await fs.rm(runDir, { recursive: true, force: true }).catch(() => undefined);

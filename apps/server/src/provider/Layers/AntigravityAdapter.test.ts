@@ -605,6 +605,50 @@ describe("Antigravity CLI integration helpers", () => {
     }
   });
 
+  it("preserves numeric usageMetadata in capture-hook payloads", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "synara-antigravity-hook-usage-"));
+    const scriptPath = path.join(directory, "capture.cjs");
+    const eventPath = path.join(directory, "events.ndjson");
+    try {
+      await fs.writeFile(scriptPath, hookScriptSource(), { mode: 0o700 });
+      const command = buildAntigravityCaptureCommand(process.execPath, scriptPath, "post-tool");
+      const payload = JSON.stringify({
+        stepIdx: 3,
+        conversationId: "conversation-usage",
+        transcriptPath: "transcript.jsonl",
+        usageMetadata: {
+          promptTokenCount: 1000,
+          candidatesTokenCount: 200,
+          totalTokenCount: 1200,
+        },
+        secret: "super-secret-token",
+        toolCall: { name: "run_command", args: { CommandLine: "echo ok" } },
+      });
+      const result = runCaptureCommand(command, payload, {
+        SYNARA_ANTIGRAVITY_EVENTS: eventPath,
+      });
+
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(0);
+      const captured = await fs.readFile(eventPath, "utf8");
+      expect(captured).not.toContain("super-secret-token");
+      expect(JSON.parse(captured.split("\t")[1]!)).toEqual({
+        conversationId: "conversation-usage",
+        transcriptPath: "transcript.jsonl",
+        stepIdx: 3,
+        usage: {
+          promptTokenCount: 1000,
+          candidatesTokenCount: 200,
+          totalTokenCount: 1200,
+        },
+        toolCall: { name: "run_command", args: { CommandLine: "echo ok" } },
+        failed: false,
+      });
+    } finally {
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("runs packaged Electron as Node only for Synara-managed sessions", () => {
     expect(
       buildAntigravityCaptureCommand(
@@ -1716,6 +1760,157 @@ describe("Antigravity turn settle on cancel (#465)", () => {
             }).pipe(
               Layer.provideMerge(
                 ServerConfig.layerTest(root, { prefix: "antigravity-transcript-test-" }),
+              ),
+              Layer.provideMerge(NodeServices.layer),
+            ),
+          ),
+        ),
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("emits exact token usage from transcript usageMetadata and not-reported when missing", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "synara-antigravity-token-usage-"));
+    const transcriptDir = path.join(
+      root,
+      ".gemini",
+      "antigravity-cli",
+      "brain",
+      "conv-usage-1",
+      ".system_generated",
+      "logs",
+    );
+    await fs.mkdir(transcriptDir, { recursive: true });
+    const transcriptFile = path.join(transcriptDir, "transcript.jsonl");
+
+    let eventFile: string | undefined;
+    let child: ChildProcess | undefined;
+    const spawnProcess = ((
+      _command: string,
+      _args: readonly string[],
+      options: { readonly env?: NodeJS.ProcessEnv },
+    ) => {
+      eventFile = options.env?.SYNARA_ANTIGRAVITY_EVENTS;
+      const spawned = new EventEmitter() as ChildProcess;
+      Object.assign(spawned, {
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+        killed: false,
+        kill: () => true,
+      });
+      child = spawned;
+      return spawned;
+    }) as NonNullable<AntigravityAdapterDependencies["spawnProcess"]>;
+
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const adapter = yield* AntigravityAdapter;
+          const firstUsage = yield* Deferred.make<void>();
+          const usageFiber = yield* adapter.streamEvents.pipe(
+            Stream.tap((event) =>
+              event.type === "thread.token-usage.updated"
+                ? Deferred.succeed(firstUsage, undefined).pipe(Effect.asVoid)
+                : Effect.void,
+            ),
+            Stream.filter(
+              (event) =>
+                event.type === "thread.token-usage.updated" || event.type === "turn.completed",
+            ),
+            Stream.take(4),
+            Stream.runCollect,
+            Effect.forkChild,
+          );
+          const threadId = ThreadId.makeUnsafe("thread-antigravity-token-usage");
+          yield* adapter.startSession({
+            provider: "antigravity",
+            threadId,
+            runtimeMode: "full-access",
+            cwd: root,
+            providerOptions: { antigravity: { binaryPath: "/fake/agy" } },
+          });
+          yield* adapter.sendTurn({
+            threadId,
+            input: "first turn",
+            attachments: [],
+          });
+
+          yield* Effect.promise(() =>
+            fs.appendFile(
+              eventFile!,
+              `pre-invocation\t${JSON.stringify({
+                conversationId: "conv-usage-1",
+                transcriptPath: transcriptFile,
+              })}\n`,
+            ),
+          );
+          yield* Effect.promise(() =>
+            fs.appendFile(
+              transcriptFile,
+              `${JSON.stringify({
+                step_index: 1,
+                type: "PLANNER_RESPONSE",
+                content: "Here is the solution.",
+                usageMetadata: {
+                  promptTokenCount: 1000,
+                  candidatesTokenCount: 200,
+                  totalTokenCount: 1200,
+                },
+              })}\n`,
+            ),
+          );
+          child?.emit("close", 0, null);
+          yield* Deferred.await(firstUsage).pipe(Effect.timeout("2 seconds"));
+
+          yield* adapter.sendTurn({
+            threadId,
+            input: "second turn",
+            attachments: [],
+          });
+          child?.emit("close", 0, null);
+
+          const terminalEvents = Array.from(
+            yield* Fiber.join(usageFiber).pipe(Effect.timeout("2 seconds")),
+          );
+          expect(new Set(terminalEvents.map((event) => event.eventId)).size).toBe(4);
+          const usageEvents = terminalEvents.filter(
+            (event) => event.type === "thread.token-usage.updated",
+          );
+          expect(usageEvents).toHaveLength(2);
+          expect(usageEvents[0]).toMatchObject({
+            type: "thread.token-usage.updated",
+            payload: {
+              usage: {
+                totalProcessedTokens: 1200,
+                inputTokens: 1000,
+                outputTokens: 200,
+                reporting: "exact",
+              },
+            },
+          });
+          expect(usageEvents[1]).toMatchObject({
+            type: "thread.token-usage.updated",
+            payload: {
+              usage: {
+                reporting: "not-reported",
+              },
+            },
+          });
+          if (usageEvents[1]?.type === "thread.token-usage.updated") {
+            expect(usageEvents[1].payload.usage.totalProcessedTokens).toBeUndefined();
+          }
+
+          yield* adapter.stopSession(threadId);
+        }).pipe(
+          Effect.provide(
+            makeAntigravityAdapterLive({
+              ensurePlugin: async () => undefined,
+              spawnProcess,
+            }).pipe(
+              Layer.provideMerge(
+                ServerConfig.layerTest(root, { prefix: "antigravity-token-usage-" }),
               ),
               Layer.provideMerge(NodeServices.layer),
             ),
