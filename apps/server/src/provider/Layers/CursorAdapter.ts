@@ -97,6 +97,7 @@ import {
   makeAcpToolCallEvent,
   stampAcpRuntimeEventLifecycleGeneration,
 } from "../acp/AcpCoreRuntimeEvents.ts";
+import { createAcpTokenUsageTracker, type AcpTokenUsageTracker } from "../acp/acpTokenUsage.ts";
 import { parsePermissionRequest } from "../acp/AcpRuntimeModel.ts";
 import { makeAcpNativeLoggers } from "../acp/AcpNativeLogging.ts";
 import {
@@ -220,6 +221,7 @@ interface CursorSessionContext {
   // idle-progress watchdog that force-fails a silently hung turn.
   lastTurnActivityAt: number | undefined;
   latestSessionCostUsd: number | undefined;
+  readonly tokenUsage: AcpTokenUsageTracker;
   // The runtime is registered before load replay settles so stop/restart can
   // close it without waiting for the replay hard cap. Turns wait here until
   // startup configuration has completed under the thread lock.
@@ -1017,6 +1019,7 @@ export function makeCursorAdapter(
             activePromptFiber: undefined,
             lastTurnActivityAt: undefined,
             latestSessionCostUsd: undefined,
+            tokenUsage: createAcpTokenUsageTracker(),
             sessionConfigReady,
             stopped: false,
           };
@@ -1129,17 +1132,22 @@ export function makeCursorAdapter(
                       "acp.jsonrpc",
                     );
                     recordCursorSessionCost(ctx, event.cost);
-                    yield* offerRuntimeEvent(
-                      input.lifecycleGeneration,
-                      makeAcpTokenUsageEvent({
-                        stamp: yield* makeEventStamp(),
-                        provider: PROVIDER,
-                        threadId: ctx.threadId,
-                        turnId: ctx.activeTurnId,
-                        usage: event.usage,
-                        rawPayload: event.rawPayload,
-                      }),
-                    );
+                    {
+                      const usage = ctx.tokenUsage.applyUsageUpdate(event.rawPayload);
+                      if (usage) {
+                        yield* offerRuntimeEvent(
+                          input.lifecycleGeneration,
+                          makeAcpTokenUsageEvent({
+                            stamp: yield* makeEventStamp(),
+                            provider: PROVIDER,
+                            threadId: ctx.threadId,
+                            turnId: ctx.activeTurnId,
+                            usage,
+                            rawPayload: event.rawPayload,
+                          }),
+                        );
+                      }
+                    }
                     return;
                 }
               }),
@@ -1405,6 +1413,25 @@ export function makeCursorAdapter(
                   stopReason: result.stopReason,
                   ...(failedToolDetail !== undefined ? { failedToolDetail } : {}),
                 });
+                // usage_update is occupancy (used/size). PromptResponse.usage is
+                // processed-token spend when the CLI reports it. Older
+                // cursor-agent builds often send usage:null and no usage_update;
+                // we emit nothing in that case instead of storing exact zeros.
+                const promptUsage = ctx.tokenUsage.applyPromptResponse(result);
+                if (promptUsage) {
+                  yield* offerRuntimeEvent(
+                    ctx.lifecycleGeneration,
+                    makeAcpTokenUsageEvent({
+                      stamp: yield* makeEventStamp(),
+                      provider: PROVIDER,
+                      threadId: input.threadId,
+                      turnId,
+                      usage: promptUsage,
+                      method: "session/prompt",
+                      rawPayload: result,
+                    }),
+                  );
+                }
                 yield* offerRuntimeEvent(ctx.lifecycleGeneration, {
                   type: "turn.completed",
                   ...(yield* makeEventStamp()),

@@ -6,8 +6,8 @@ import type {
 } from "@synara/contracts";
 import { summarizeToolRawOutput } from "@synara/shared/toolOutputSummary";
 
-import { computeUsagePercent, nonNegativeInteger, positiveInteger } from "../tokenUsage.ts";
 import { canonicalItemTypeFromAcpToolKind } from "./AcpAdapterSupport.ts";
+import { snapshotFromAcpUsageUpdate } from "./acpTokenUsage.ts";
 
 type AcpTextStreamKind = Extract<RuntimeContentStreamKind, "assistant_text" | "reasoning_text">;
 
@@ -200,23 +200,13 @@ function normalizeToolCallStatus(
   }
 }
 
-// Converts ACP's unstable usage updates into Synara's context-window snapshot shape.
-function tokenUsageSnapshotFromAcpUsageUpdate(input: {
-  readonly size: unknown;
-  readonly used: unknown;
-}): ThreadTokenUsageSnapshot | undefined {
-  const usedTokens = nonNegativeInteger(input.used);
-  if (usedTokens === undefined) {
-    return undefined;
-  }
-  const maxTokens = positiveInteger(input.size);
-  const usedPercent = computeUsagePercent(usedTokens, maxTokens);
-  return {
-    usedTokens,
-    ...(usedPercent !== undefined ? { usedPercent } : {}),
-    ...(maxTokens !== undefined ? { maxTokens } : {}),
-    compactsAutomatically: true,
-  };
+// Converts ACP usage_update notifications into Synara snapshots. Occupancy
+// (used/size) and any `_meta` processed-token breakdown are both accepted;
+// missing telemetry is dropped rather than stored as zero.
+function tokenUsageSnapshotFromAcpUsageUpdate(
+  update: unknown,
+): ThreadTokenUsageSnapshot | undefined {
+  return snapshotFromAcpUsageUpdate(update);
 }
 
 function normalizeCommandValue(value: unknown): string | undefined {
@@ -651,10 +641,7 @@ export function parseSessionUpdateEvent(params: Acp.SessionNotification): {
       break;
     }
     case "usage_update": {
-      const usage = tokenUsageSnapshotFromAcpUsageUpdate({
-        size: upd.size,
-        used: upd.used,
-      });
+      const usage = tokenUsageSnapshotFromAcpUsageUpdate(upd);
       if (usage) {
         events.push({
           _tag: "UsageUpdated",

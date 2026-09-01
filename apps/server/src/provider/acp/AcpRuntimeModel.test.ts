@@ -504,6 +504,7 @@ describe("AcpRuntimeModel", () => {
           usedPercent: 4.2,
           maxTokens: 1_000_000,
           compactsAutomatically: true,
+          reporting: "estimated",
         },
         cost: {
           amount: 0.2,
@@ -518,6 +519,71 @@ describe("AcpRuntimeModel", () => {
             cost: {
               amount: 0.2,
               currency: "USD",
+            },
+          },
+        },
+      },
+    ]);
+  });
+
+  it("drops usage_update notifications that do not report occupancy or processed tokens", () => {
+    const result = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "usage_update",
+        used: 0,
+        size: 0,
+      },
+    } satisfies Acp.SessionNotification);
+
+    expect(result.events).toEqual([]);
+  });
+
+  it("projects usage_update _meta processed tokens alongside occupancy", () => {
+    const result = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "usage_update",
+        used: 42_000,
+        size: 1_000_000,
+        _meta: {
+          usage: {
+            inputTokens: 8_000,
+            outputTokens: 1_200,
+            totalTokens: 9_200,
+          },
+        },
+      },
+    } as Acp.SessionNotification);
+
+    expect(result.events).toEqual([
+      {
+        _tag: "UsageUpdated",
+        usage: {
+          usedTokens: 42_000,
+          usedPercent: 4.2,
+          maxTokens: 1_000_000,
+          compactsAutomatically: true,
+          totalProcessedTokens: 9_200,
+          inputTokens: 8_000,
+          outputTokens: 1_200,
+          lastUsedTokens: 9_200,
+          lastInputTokens: 8_000,
+          lastOutputTokens: 1_200,
+          reporting: "estimated",
+        },
+        rawPayload: {
+          sessionId: "session-1",
+          update: {
+            sessionUpdate: "usage_update",
+            used: 42_000,
+            size: 1_000_000,
+            _meta: {
+              usage: {
+                inputTokens: 8_000,
+                outputTokens: 1_200,
+                totalTokens: 9_200,
+              },
             },
           },
         },
