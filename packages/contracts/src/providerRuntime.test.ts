@@ -201,6 +201,29 @@ describe("ProviderRuntimeEvent", () => {
     expect(parsed.payload.usage.usedPercent).toBe(15.6255);
   });
 
+  it("decodes explicit not-reported token usage without inventing counters", () => {
+    const parsed = decodeRuntimeEvent({
+      type: "thread.token-usage.updated",
+      eventId: "event-token-usage-not-reported",
+      provider: "antigravity",
+      createdAt: "2026-02-28T00:00:04.000Z",
+      threadId: "thread-1",
+      payload: {
+        usage: {
+          usedTokens: 0,
+          reporting: "not-reported",
+        },
+      },
+    });
+
+    expect(parsed.type).toBe("thread.token-usage.updated");
+    if (parsed.type !== "thread.token-usage.updated") {
+      throw new Error("expected thread.token-usage.updated");
+    }
+    expect(parsed.payload.usage.reporting).toBe("not-reported");
+    expect(parsed.payload.usage.totalProcessedTokens).toBeUndefined();
+  });
+
   it("decodes item.completed with raw (untrimmed) tool output in detail", () => {
     // Tool output legitimately carries leading/trailing whitespace; the durable
     // journal must not reject it (previously quarantined with

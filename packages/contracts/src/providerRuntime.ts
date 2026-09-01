@@ -335,6 +335,10 @@ export const ThreadTokenUsageSnapshot = Schema.Struct({
   toolUses: Schema.optional(NonNegativeInt),
   durationMs: Schema.optional(NonNegativeInt),
   compactsAutomatically: Schema.optional(Schema.Boolean),
+  // Exact: provider-reported counters. Estimated: derived and must not be mixed
+  // into exact profile totals. not-reported: the adapter observed a completed
+  // turn but the provider did not emit token telemetry.
+  reporting: Schema.optional(Schema.Literals(["exact", "estimated", "not-reported"])),
 });
 export type ThreadTokenUsageSnapshot = typeof ThreadTokenUsageSnapshot.Type;
 

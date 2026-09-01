@@ -157,6 +157,10 @@ export const ProfileTokenStats = Schema.Struct({
   peakDayTokens: Schema.NullOr(NonNegativeInt),
   peakDay: Schema.NullOr(TrimmedNonEmptyString),
   providers: Schema.Array(ProviderKind),
+  // Providers whose totals include a local transcript estimate because the
+  // provider did not report processed-token counters. Exact and estimated
+  // providers both remain visible; clients can label the aggregate honestly.
+  estimatedProviders: Schema.optional(Schema.Array(ProviderKind)),
   // Providers with recorded turns but no token telemetry (their adapters never
   // emit context-window updates); excluded from token-based rankings.
   unavailableProviders: Schema.Array(ProviderKind),

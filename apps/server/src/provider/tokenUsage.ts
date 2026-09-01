@@ -30,8 +30,12 @@ export function computeUsagePercent(
   usedTokens: number,
   maxTokens: number | undefined,
 ): number | undefined {
-  if (maxTokens === undefined) {
+  if (maxTokens === undefined || maxTokens <= 0) {
     return undefined;
   }
-  return Math.min(100, Math.max(0, (usedTokens / maxTokens) * 100));
+  const percent = (usedTokens / maxTokens) * 100;
+  if (!Number.isFinite(percent)) {
+    return undefined;
+  }
+  return Math.min(100, Math.max(0, percent));
 }
