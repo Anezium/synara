@@ -338,4 +338,96 @@ describe("buildCodexProcessEnv", () => {
       rmSync(runtimeHome, { recursive: true, force: true });
     }
   });
+
+  it("keeps unindented marker lines inside TOML multiline strings", async () => {
+    const sourceHome = mkdtempSync(path.join(os.tmpdir(), "synara-codex-marker-multiline-"));
+    const runtimeHome = mkdtempSync(path.join(os.tmpdir(), "synara-codex-marker-multiline-rt-"));
+    const sourceConfig = [
+      'basic = """',
+      "# >>> synara managed config >>>",
+      "basic string content stays",
+      "# <<< synara managed config <<<",
+      '"""',
+      "literal = '''",
+      "# >>> synara managed config >>>",
+      "literal string content stays",
+      '# <<< synara managed config <<< """ still literal',
+      "'''",
+      'inline = """one""" # a comment mentioning """',
+      "",
+      "# >>> synara managed config >>>",
+      "[mcp_servers.synara]",
+      'url = "http://127.0.0.1:61240/mcp"',
+      "# <<< synara managed config <<<",
+      "",
+      "[tail]",
+      'kept = "after the managed block"',
+    ].join("\n");
+    writeFileSync(path.join(sourceHome, "config.toml"), sourceConfig, "utf8");
+
+    try {
+      const env = await buildCodexProcessEnv({
+        env: { SYNARA_HOME: runtimeHome, CODEX_HOME: sourceHome },
+        platform: "darwin",
+        appendConfigToml: ["[mcp_servers.synara]", 'url = "http://127.0.0.1:64449/mcp"'].join("\n"),
+      });
+      const overlayHome = env.CODEX_HOME;
+      if (!overlayHome) throw new Error("Expected a child Synara Codex home overlay.");
+      const overlayConfig = readFileSync(path.join(overlayHome, "config.toml"), "utf8");
+
+      expect(overlayConfig).toContain("basic string content stays");
+      expect(overlayConfig).toContain("literal string content stays");
+      expect(overlayConfig).toContain('# <<< synara managed config <<< """ still literal');
+      expect(overlayConfig).toContain('kept = "after the managed block"');
+      expect(overlayConfig).toContain('url = "http://127.0.0.1:64449/mcp"');
+      expect(overlayConfig).not.toContain("http://127.0.0.1:61240/mcp");
+      // Two string-embedded begin markers plus the single rebuilt block.
+      expect(overlayConfig.match(/^# >>> synara managed config >>>$/gm)).toHaveLength(3);
+      expect(overlayConfig.match(/^\[mcp_servers\.synara\]$/gm)).toHaveLength(1);
+    } finally {
+      rmSync(sourceHome, { recursive: true, force: true });
+      rmSync(runtimeHome, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves config after an unmatched managed begin marker", async () => {
+    const sourceHome = mkdtempSync(path.join(os.tmpdir(), "synara-codex-marker-truncated-"));
+    const runtimeHome = mkdtempSync(path.join(os.tmpdir(), "synara-codex-marker-truncated-rt-"));
+    const sourceConfig = [
+      'model = "gpt-5.6-sol"',
+      "",
+      "# >>> synara managed config >>>",
+      "[mcp_servers.synara]",
+      'url = "http://127.0.0.1:61240/mcp"',
+      "",
+      "[user_table]",
+      'kept = "after the truncated block"',
+    ].join("\n");
+    writeFileSync(path.join(sourceHome, "config.toml"), sourceConfig, "utf8");
+
+    try {
+      const env = await buildCodexProcessEnv({
+        env: { SYNARA_HOME: runtimeHome, CODEX_HOME: sourceHome },
+        platform: "darwin",
+        appendConfigToml: ["[mcp_servers.synara]", 'url = "http://127.0.0.1:64449/mcp"'].join("\n"),
+      });
+      const overlayHome = env.CODEX_HOME;
+      if (!overlayHome) throw new Error("Expected a child Synara Codex home overlay.");
+      const overlayConfig = readFileSync(path.join(overlayHome, "config.toml"), "utf8");
+
+      expect(overlayConfig).toContain('model = "gpt-5.6-sol"');
+      expect(overlayConfig).toContain("[user_table]");
+      expect(overlayConfig).toContain('kept = "after the truncated block"');
+      // The stale endpoint is replaced by the session table, and the new
+      // block is still appended even though a begin marker already exists.
+      expect(overlayConfig).toContain('url = "http://127.0.0.1:64449/mcp"');
+      expect(overlayConfig).not.toContain("http://127.0.0.1:61240/mcp");
+      expect(overlayConfig.match(/^# <<< synara managed config <<<$/gm)).toHaveLength(1);
+      expect(overlayConfig.match(/^\[mcp_servers\.synara\]$/gm)).toHaveLength(1);
+      expect(readFileSync(path.join(sourceHome, "config.toml"), "utf8")).toBe(sourceConfig);
+    } finally {
+      rmSync(sourceHome, { recursive: true, force: true });
+      rmSync(runtimeHome, { recursive: true, force: true });
+    }
+  });
 });
