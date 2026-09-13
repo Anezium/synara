@@ -1933,10 +1933,13 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
               // Without a pre-tool entry the marker above cannot help: a hook that
               // arrives after the transcript already settled the task must not
               // re-register it, or nothing would ever settle it again.
-              const settled = matchAntigravityTrackedTaskId(
-                bgStart.taskId,
-                context.settledBackgroundTaskIds,
-              );
+              // Only a named start can be matched against settled ids: with no
+              // candidate the matcher returns a lone tracked id, which would
+              // silently drop a genuine anonymous background start.
+              const settled =
+                bgStart.taskId !== undefined &&
+                matchAntigravityTrackedTaskId(bgStart.taskId, context.settledBackgroundTaskIds) !==
+                  undefined;
               if (!settled) {
                 registerBackgroundTask(context, bgStart, toolItemType(toolName), {
                   name: toolName,
