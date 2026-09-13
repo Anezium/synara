@@ -99,6 +99,8 @@ type PendingTool = {
   readonly itemType: "command_execution" | "file_change" | "dynamic_tool_call" | "web_search";
   readonly name: string;
   readonly args?: Record<string, unknown>;
+  /** Set when the transcript already reported this call as a background task. */
+  backgroundedByTranscript?: boolean;
 };
 
 type StoredTurn = {
@@ -857,6 +859,21 @@ export function detectAntigravityBackgroundTaskStart(
   return null;
 }
 
+/** agy's GENERIC RUNNING step lands before the stop hook; post-tool only once the task ends. */
+export function parseAntigravityBackgroundTaskStep(
+  content: string | undefined,
+): { taskId: string; description?: string } | null {
+  if (typeof content !== "string" || !/background task/iu.test(content)) return null;
+  const match =
+    content.match(/background task with task id:?\s*["']?([^\s"',]+)/iu) ??
+    content.match(/Task id ["']([^"']+)["']/iu) ??
+    content.match(/(?:[\w.-]+\/)?task-[\w.-]+/iu);
+  const taskId = (match?.[1] ?? match?.[0])?.trim();
+  if (!taskId) return null;
+  const description = content.match(/^Task Description:[ \t]*(.+)$/mu)?.[1]?.trim();
+  return { taskId, ...(description ? { description } : {}) };
+}
+
 export function matchAntigravityTrackedTaskId(
   candidateId: string | undefined,
   trackedTaskIds: Iterable<string>,
@@ -1179,7 +1196,7 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
         return;
       }
       const taskId = start.taskId;
-      if (context.pendingBackgroundTasks.has(taskId)) return;
+      if (matchAntigravityTrackedTaskId(taskId, context.pendingBackgroundTasks.keys())) return;
       context.pendingBackgroundTasks.set(taskId, {
         taskId,
         taskType,
@@ -1441,6 +1458,29 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
             context.pendingBackgroundTaskCompletions.shift();
           }
         }
+        return;
+      }
+
+      const backgroundStart =
+        step.type === "GENERIC" && step.status === "RUNNING"
+          ? parseAntigravityBackgroundTaskStep(step.content)
+          : null;
+      if (backgroundStart) {
+        const pending =
+          context.pendingTools.find(
+            (tool) => stepIndex !== undefined && tool.stepIndex === stepIndex - 1,
+          ) ?? context.pendingTools.findLast((tool) => tool.name === "run_command");
+        if (pending) pending.backgroundedByTranscript = true;
+        const command = pending?.args?.CommandLine;
+        const description =
+          backgroundStart.description ?? (typeof command === "string" ? command : undefined);
+        const name = pending?.name ?? "run_command";
+        registerBackgroundTask(
+          context,
+          { taskId: backgroundStart.taskId, ...(description ? { description } : {}) },
+          toolItemType(name),
+          { name, ...(pending?.args ? { args: pending.args } : {}) },
+        );
         return;
       }
 
@@ -1852,7 +1892,8 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
             } satisfies ProviderRuntimeEvent);
           }
 
-          if (!failed && toolName) {
+          // A transcript-registered task's post-tool hook reports its end, not a new start.
+          if (!failed && toolName && !pending?.backgroundedByTranscript) {
             const bgStart = detectAntigravityBackgroundTaskStart(toolName, toolArgs, payload);
             if (bgStart?.isBackground) {
               registerBackgroundTask(context, bgStart, toolItemType(toolName), {

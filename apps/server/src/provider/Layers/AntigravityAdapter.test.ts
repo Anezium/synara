@@ -30,6 +30,7 @@ import {
   makeAntigravityRuntimeEventBase,
   makeAntigravityAdapterLive,
   matchAntigravityTrackedTaskId,
+  parseAntigravityBackgroundTaskStep,
   parseAntigravityCliModelLabel,
   parseAntigravityModelLines,
   parseAntigravitySystemMessage,
@@ -1862,6 +1863,26 @@ describe("Antigravity turn settle on cancel (#465)", () => {
   });
 });
 
+const agyTaskId = "e5c58127-8ca4-48d1-af24-6f2bc370f613/task-997";
+const agyCommand =
+  "adb -s 1901092534053723 shell uiautomator dump /sdcard/native_overlay.xml; adb -s 1901092534053723 pull /sdcard/native_overlay.xml E:\\Tools\\Rokid\\tmp\\native_overlay_dump.xml";
+const agyRunningStep = (step_index: number, taskId = agyTaskId) => ({
+  step_index,
+  type: "GENERIC",
+  status: "RUNNING",
+  content: `Created At: 2026-09-13T14:25:03+02:00\nTool is running as a background task with task id: ${taskId}\nTask Description: ${agyCommand}\nTask logs are available at: file:///C:/tmp/task.log\nYOU MUST TAKE ONE OF THE FOLLOWING TWO ACTIONS: ...\n DO NOTHING ELSE.`,
+});
+const agyCompletionStep = (step_index: number, taskId = agyTaskId) => ({
+  step_index,
+  type: "SYSTEM_MESSAGE",
+  content: `<SYSTEM_MESSAGE>\n[Message] sender=${taskId} priority=MESSAGE_PRIORITY_HIGH content=Task id "${taskId}" exited with code 0\n</SYSTEM_MESSAGE>`,
+});
+const agyText = (step_index: number, content: string) => ({
+  step_index,
+  type: "PLANNER_RESPONSE",
+  content,
+});
+
 describe("Antigravity background task helpers (#752)", () => {
   it("parses system message task ids and exit codes", () => {
     expect(parseAntigravitySystemMessage("plain assistant text")).toBeNull();
@@ -2149,6 +2170,182 @@ describe("Antigravity background task helpers (#752)", () => {
       await fs.rm(root, { recursive: true, force: true });
     }
   });
+
+  it("parses agy GENERIC RUNNING background task steps", () => {
+    expect(parseAntigravityBackgroundTaskStep(agyRunningStep(997).content)).toEqual({
+      taskId: agyTaskId,
+      description: agyCommand,
+    });
+    expect(
+      parseAntigravityBackgroundTaskStep('Task id "task-5" moved to a background task'),
+    ).toEqual({ taskId: "task-5" });
+    expect(parseAntigravityBackgroundTaskStep("Created file E:\\tmp\\task-1.txt")).toBeNull();
+    expect(parseAntigravityBackgroundTaskStep(undefined)).toBeNull();
+  });
+
+  const runAgyBackgroundScenario = async (
+    label: string,
+    drive: (io: {
+      readonly hooks: (...lines: string[]) => void;
+      readonly transcript: (...steps: object[]) => void;
+      readonly waitUntil: (check: () => boolean) => Effect.Effect<void>;
+      readonly counts: { teardowns: number; assistantMessages: number };
+    }) => Effect.Effect<void>,
+  ) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), `synara-antigravity-${label}-`));
+    const transcriptFile = path.join(root, "transcript.jsonl");
+    await fs.writeFile(transcriptFile, "");
+    let eventFile: string | undefined;
+    let child: ChildProcess | undefined;
+    const counts = { teardowns: 0, assistantMessages: 0 };
+    const spawnProcess = ((
+      _command: string,
+      _args: readonly string[],
+      options: { readonly env?: NodeJS.ProcessEnv },
+    ) => {
+      eventFile = options.env?.SYNARA_ANTIGRAVITY_EVENTS;
+      const spawned = new EventEmitter() as ChildProcess;
+      Object.assign(spawned, {
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+        killed: false,
+        kill: () => true,
+      });
+      child = spawned;
+      return spawned;
+    }) as NonNullable<AntigravityAdapterDependencies["spawnProcess"]>;
+    const waitUntil = (check: () => boolean) =>
+      Effect.promise(async () => {
+        for (let attempt = 0; attempt < 200 && !check(); attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(check()).toBe(true);
+      });
+
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const adapter = yield* AntigravityAdapter;
+          let turnsCompleted = 0;
+          const eventsFiber = yield* adapter.streamEvents.pipe(
+            Stream.runForEach((event) =>
+              Effect.sync(() => {
+                if (event.type === "turn.completed") turnsCompleted += 1;
+                if (
+                  event.type === "item.completed" &&
+                  event.payload.itemType === "assistant_message"
+                ) {
+                  counts.assistantMessages += 1;
+                }
+              }),
+            ),
+            Effect.forkChild,
+          );
+          const threadId = ThreadId.makeUnsafe(`thread-antigravity-${label}`);
+          yield* adapter.startSession({
+            provider: "antigravity",
+            threadId,
+            runtimeMode: "full-access",
+            cwd: root,
+            providerOptions: { antigravity: { binaryPath: "/fake/agy" } },
+          });
+          yield* adapter.sendTurn({ threadId, input: "dump the overlay", attachments: [] });
+          const append = (file: string, entries: unknown[]) =>
+            fsSync.appendFileSync(
+              file,
+              entries.map((e) => `${typeof e === "string" ? e : JSON.stringify(e)}\n`).join(""),
+            );
+          const transcriptPath = transcriptFile;
+          append(eventFile!, [`pre-invocation\t${JSON.stringify({ transcriptPath })}`]);
+          yield* drive({
+            hooks: (...lines) => append(eventFile!, lines),
+            transcript: (...steps) => append(transcriptFile, steps),
+            waitUntil,
+            counts,
+          });
+          yield* Effect.sleep("200 millis");
+          expect(counts.teardowns).toBe(1);
+
+          child?.emit("close", 0, null);
+          yield* waitUntil(() => turnsCompleted === 1);
+          yield* Effect.sleep("100 millis");
+          expect(turnsCompleted).toBe(1);
+          yield* Fiber.interrupt(eventsFiber);
+          yield* adapter.stopSession(threadId);
+        }).pipe(
+          Effect.provide(
+            makeAntigravityAdapterLive({
+              ensurePlugin: async () => undefined,
+              spawnProcess,
+              teardownProcessTree: async () => {
+                counts.teardowns += 1;
+                return completeProcessTeardown();
+              },
+            }).pipe(
+              Layer.provideMerge(ServerConfig.layerTest(root, { prefix: `antigravity-${label}-` })),
+              Layer.provideMerge(NodeServices.layer),
+            ),
+          ),
+        ),
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  };
+
+  it("keeps agy alive when a command is backgrounded before the stop hook", () =>
+    runAgyBackgroundScenario("agy-transcript-background", (io) =>
+      Effect.gen(function* () {
+        const args = JSON.stringify({ CommandLine: agyCommand, WaitMsBeforeAsync: "5000" });
+        const toolCall = `"toolCall":{"name":"run_command","args":${args}}`;
+        io.hooks(`pre-tool\t{"stepIdx":996,${toolCall}}`);
+        io.transcript(agyRunningStep(997), agyText(998, "Dumping native overlay hierarchy."));
+        io.hooks('stop\t{"stepIdx":998}');
+        yield* io.waitUntil(() => io.counts.assistantMessages === 1);
+        yield* Effect.sleep("200 millis");
+        expect(io.counts.teardowns).toBe(0);
+
+        io.transcript(agyCompletionStep(999), agyText(1000, "Overlay dumped."));
+        yield* io.waitUntil(() => io.counts.assistantMessages === 2);
+        // agy 1.2.2 sends post-tool only once the task finished: no re-registration.
+        io.hooks(
+          `post-tool\t{"stepIdx":996,${toolCall},"toolOutput":${JSON.stringify(agyRunningStep(997).content)}}`,
+          'stop\t{"stepIdx":1000}',
+        );
+        yield* io.waitUntil(() => io.counts.teardowns === 1);
+      }),
+    ));
+
+  it("tracks a transcript background task once when post-tool reports it too", () =>
+    runAgyBackgroundScenario("agy-background-dedupe", (io) =>
+      Effect.gen(function* () {
+        io.transcript(agyRunningStep(6, "session-a/task-6"), agyText(7, "Waiting for the build."));
+        yield* io.waitUntil(() => io.counts.assistantMessages === 1);
+        io.hooks(
+          `post-tool\t{"stepIdx":5,"toolCall":{"name":"run_command","args":{"CommandLine":"npm run build","WaitMsBeforeAsync":"5000"}},"toolOutput":"Task id 'task-6' is running in the background"}`,
+          'stop\t{"stepIdx":7}',
+        );
+        yield* Effect.sleep("200 millis");
+        expect(io.counts.teardowns).toBe(0);
+
+        io.transcript(agyCompletionStep(8, "session-a/task-6"), agyText(9, "Build done."));
+        io.hooks('stop\t{"stepIdx":9}');
+        yield* io.waitUntil(() => io.counts.teardowns === 1);
+      }),
+    ));
+
+  it("settles a transcript background task whose completion was read first", () =>
+    runAgyBackgroundScenario("agy-background-early-completion", (io) =>
+      Effect.gen(function* () {
+        io.transcript(
+          agyCompletionStep(9, "session-b/task-8"),
+          agyRunningStep(8, "session-b/task-8"),
+          agyText(10, "Command finished."),
+        );
+        io.hooks('stop\t{"stepIdx":10}');
+        yield* io.waitUntil(() => io.counts.teardowns === 1);
+      }),
+    ));
 
   it("performs a fresh final hook drain when the process closes during a poll", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "synara-antigravity-final-drain-"));
