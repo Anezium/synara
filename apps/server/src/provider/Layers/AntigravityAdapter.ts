@@ -1212,7 +1212,9 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
       taskType: string,
       source: { readonly name: string; readonly args?: Record<string, unknown> },
     ): void => {
-      if (context.stopped) return;
+      // A hook poll or transcript read still in flight when the turn was
+      // interrupted or settled must not register a task nobody will settle.
+      if (context.stopped || context.interrupted || context.turnTerminalEmitted) return;
       if (!start.taskId) {
         context.pendingAnonymousBackgroundTasks += 1;
         return;
