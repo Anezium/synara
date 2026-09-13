@@ -121,7 +121,7 @@ type BackgroundTaskTerminal = { readonly taskId: string } & (
 );
 
 type PendingBackgroundTaskTerminal = BackgroundTaskTerminal & {
-  /** Only anonymous starts already observed at settlement can receive its credit. */
+  /** Retain this identity while anonymous starts observed at arrival still need matching. */
   readonly anonymousThroughSequence?: number;
 };
 
@@ -1256,26 +1256,6 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
       return true;
     };
 
-    // Starts and credit boundaries are monotonic. Match the oldest surviving
-    // eligible occurrence so a delayed completion never credits a future call.
-    const settledAnonymousBackgroundTaskCount = (context: AntigravitySessionContext): number => {
-      let settled = 0;
-      for (const terminal of context.pendingBackgroundTaskTerminals) {
-        const task = context.pendingAnonymousBackgroundTasks[settled];
-        if (
-          task !== undefined &&
-          terminal.anonymousThroughSequence !== undefined &&
-          task.sequence <= terminal.anonymousThroughSequence
-        ) {
-          settled += 1;
-        }
-      }
-      return settled;
-    };
-
-    const pendingAnonymousBackgroundTaskCount = (context: AntigravitySessionContext): number =>
-      context.pendingAnonymousBackgroundTasks.length - settledAnonymousBackgroundTaskCount(context);
-
     const queueBackgroundTaskTerminal = (
       context: AntigravitySessionContext,
       terminal: BackgroundTaskTerminal,
@@ -1288,16 +1268,14 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
         )
       )
         return false;
-      const anonymousThroughSequence =
-        pendingAnonymousBackgroundTaskCount(context) > 0
-          ? context.pendingAnonymousBackgroundTasks.at(-1)?.sequence
-          : undefined;
+      const anonymousThroughSequence = context.pendingAnonymousBackgroundTasks.at(-1)?.sequence;
       context.pendingBackgroundTaskTerminals.push({
         ...terminal,
         ...(anonymousThroughSequence !== undefined ? { anonymousThroughSequence } : {}),
       });
-      // Keep terminal identities needed by anonymous calls until their transcript
-      // starts arrive. A credit never applies to a later anonymous command.
+      // Keep terminal identities until delayed transcript starts can match them.
+      // An unmatched terminal may belong to a different task, so it cannot settle
+      // an anonymous call or allow Stop to tear down the process before that match.
       const oldestAnonymousSequence = context.pendingAnonymousBackgroundTasks[0]?.sequence;
       const unmatched = context.pendingBackgroundTaskTerminals.filter(
         (pending) =>
@@ -1362,8 +1340,8 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
         terminalIndex < 0
           ? undefined
           : context.pendingBackgroundTaskTerminals.splice(terminalIndex, 1)[0];
-      // Naming a killed anonymous call removes its own occurrence and credit,
-      // but must not reopen it or spend that credit on another running command.
+      // Naming a killed anonymous call removes only its own occurrence and
+      // terminal; it must not reopen it or settle another running command.
       if (
         terminal?.kind === "killed" ||
         matchAntigravityTrackedTaskId(taskId, context.settledBackgroundTaskIds)
@@ -1396,7 +1374,7 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
         !context.activeProcess ||
         context.turnTerminalEmitted ||
         context.pendingBackgroundTasks.size > 0 ||
-        pendingAnonymousBackgroundTaskCount(context) > 0
+        context.pendingAnonymousBackgroundTasks.length > 0
       ) {
         return;
       }
@@ -1661,7 +1639,12 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
             item !== null &&
             (item as TranscriptStep).step_index === toolStep,
         );
-        const plannerCall = plannerStep?.tool_calls?.find((call) => typeof call?.name === "string");
+        const plannerCall = plannerStep?.tool_calls?.find(
+          (call) =>
+            typeof call?.name === "string" &&
+            wantedCommand !== undefined &&
+            normalizeAntigravityCommandLine(call.args?.CommandLine) === wantedCommand,
+        );
         const name = pending?.name ?? plannerCall?.name ?? "run_command";
         registerBackgroundTask(
           context,
@@ -2583,7 +2566,7 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
               !stderr.trim() &&
               context.pendingTools.length === 0 &&
               context.pendingBackgroundTasks.size === 0 &&
-              pendingAnonymousBackgroundTaskCount(context) === 0;
+              context.pendingAnonymousBackgroundTasks.length === 0;
             const interrupted =
               context.interrupted ||
               printResult?.state === "interrupted" ||

@@ -2071,12 +2071,16 @@ describe("Antigravity background task helpers (#752)", () => {
           const adapter = yield* AntigravityAdapter;
           const toolsCompleted = yield* Deferred.make<void>();
           const followupObserved = yield* Deferred.make<void>();
+          const backgroundTaskCompleted = yield* Deferred.make<void>();
           const runtimeTaskEvents: string[] = [];
           let completedTools = 0;
           const eventsFiber = yield* adapter.streamEvents.pipe(
             Stream.runForEach((event) =>
               Effect.gen(function* () {
                 if (event.type.startsWith("task.")) runtimeTaskEvents.push(event.type);
+                if (event.type === "task.completed") {
+                  yield* Deferred.succeed(backgroundTaskCompleted, undefined);
+                }
                 if (event.type === "item.completed" && ++completedTools === 2) {
                   yield* Deferred.succeed(toolsCompleted, undefined);
                 }
@@ -2140,10 +2144,35 @@ describe("Antigravity background task helpers (#752)", () => {
           });
           yield* Deferred.await(followupObserved).pipe(Effect.timeout("2 seconds"));
           expect(teardownCalls).toBe(0);
-          yield* Effect.sync(() => fsSync.appendFileSync(eventFile!, "stop\t{}\n"));
+          yield* Effect.sync(() => {
+            // Anonymous starts need their transcript identities before either
+            // terminal can settle them and permit the final Stop to tear down.
+            fsSync.appendFileSync(
+              transcriptFile,
+              [
+                JSON.stringify({
+                  step_index: 2,
+                  type: "GENERIC",
+                  status: "RUNNING",
+                  content:
+                    "Tool is running as a background task with task id: task-real-a\nTask Description: npm test",
+                }),
+                JSON.stringify({
+                  step_index: 3,
+                  type: "GENERIC",
+                  status: "RUNNING",
+                  content:
+                    "Tool is running as a background task with task id: task-real-b\nTask Description: npm run dev",
+                }),
+                "",
+              ].join("\n"),
+            );
+            fsSync.appendFileSync(eventFile!, "stop\t{}\n");
+          });
           yield* Effect.promise(() => teardownObserved).pipe(Effect.timeout("2 seconds"));
+          yield* Deferred.await(backgroundTaskCompleted).pipe(Effect.timeout("2 seconds"));
           expect(teardownCalls).toBe(1);
-          expect(runtimeTaskEvents).toEqual([]);
+          expect(runtimeTaskEvents).toEqual(["task.started", "task.completed"]);
           yield* Fiber.interrupt(eventsFiber);
 
           child?.emit("close", 0, null);
@@ -2202,6 +2231,7 @@ describe("Antigravity background task helpers (#752)", () => {
       readonly waitUntil: (check: () => boolean) => Effect.Effect<void>;
       readonly counts: { teardowns: number; assistantMessages: number };
       readonly taskEvents: { type: string; taskId: string }[];
+      readonly taskStarts: { taskType: string | undefined; source: unknown }[];
     }) => Effect.Effect<void>,
   ) => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), `synara-antigravity-${label}-`));
@@ -2211,6 +2241,7 @@ describe("Antigravity background task helpers (#752)", () => {
     let child: ChildProcess | undefined;
     const counts = { teardowns: 0, assistantMessages: 0 };
     const taskEvents: { type: string; taskId: string }[] = [];
+    const taskStarts: { taskType: string | undefined; source: unknown }[] = [];
     const spawnProcess = ((
       _command: string,
       _args: readonly string[],
@@ -2247,6 +2278,9 @@ describe("Antigravity background task helpers (#752)", () => {
                 if (event.type === "task.started" || event.type === "task.completed") {
                   taskEvents.push({ type: event.type, taskId: event.payload.taskId });
                 }
+                if (event.type === "task.started") {
+                  taskStarts.push({ taskType: event.payload.taskType, source: event.raw?.payload });
+                }
                 if (
                   event.type === "item.completed" &&
                   event.payload.itemType === "assistant_message"
@@ -2279,6 +2313,7 @@ describe("Antigravity background task helpers (#752)", () => {
             waitUntil,
             counts,
             taskEvents,
+            taskStarts,
           });
           yield* Effect.sleep("200 millis");
           expect(counts.teardowns).toBe(1);
@@ -2507,6 +2542,49 @@ describe("Antigravity background task helpers (#752)", () => {
       }),
     ));
 
+  it.each(["matched", "unmatched", "missing-description"])(
+    "derives the background task type from its planner command before hooks arrive (%s)",
+    (scenario) =>
+      runAgyBackgroundScenario(`planner-command-${scenario}`, (io) =>
+        Effect.gen(function* () {
+          const running = agyRunningStep(997);
+          io.transcript(
+            {
+              step_index: 996,
+              type: "PLANNER_RESPONSE",
+              tool_calls: [
+                { name: "search_web", args: { Query: "overlay" } },
+                { name: "write_to_file", args: { TargetFile: "/tmp/overlay.txt" } },
+                ...(scenario === "unmatched"
+                  ? []
+                  : [{ name: "run_command", args: { CommandLine: `"${agyCommand}"` } }]),
+              ],
+            },
+            scenario === "missing-description"
+              ? {
+                  ...running,
+                  content: `Tool is running as a background task with task id: ${agyTaskId}`,
+                }
+              : running,
+            agyText(998, "Waiting for the command."),
+          );
+          yield* io.waitUntil(() => io.counts.assistantMessages === 1);
+          expect(io.taskStarts).toEqual([
+            {
+              taskType: "command_execution",
+              source: expect.objectContaining({ taskId: agyTaskId, name: "run_command" }),
+            },
+          ]);
+          io.hooks('stop\t{"stepIdx":998}');
+          yield* Effect.sleep("150 millis");
+          expect(io.counts.teardowns).toBe(0);
+          io.transcript(agyCompletionStep(999), agyText(1000, "Done."));
+          io.hooks('stop\t{"stepIdx":1000}');
+          yield* io.waitUntil(() => io.counts.teardowns === 1);
+        }),
+      ),
+  );
+
   it("tracks a transcript background task once when post-tool reports it too", () =>
     runAgyBackgroundScenario("agy-background-dedupe", (io) =>
       Effect.gen(function* () {
@@ -2631,6 +2709,52 @@ describe("Antigravity background task helpers (#752)", () => {
           );
           io.hooks('stop\t{"stepIdx":22}');
           yield* io.waitUntil(() => io.counts.teardowns === 1);
+        }),
+      ),
+  );
+
+  it.each(["completed", "killed"])(
+    "keeps an anonymous command alive when an unrelated task is %s before Stop and its delayed start",
+    (terminalState) =>
+      runAgyBackgroundScenario(`unrelated-terminal-before-stop-${terminalState}`, (io) =>
+        Effect.gen(function* () {
+          io.hooks(
+            `post-tool\t${JSON.stringify({ stepIdx: 7, toolCall: { name: "run_command", args: { CommandLine: agyCommand } }, toolOutput: "Command sent to the background" })}`,
+          );
+          if (terminalState === "completed") {
+            io.transcript(agyCompletionStep(19, "session/task-18"));
+          } else {
+            io.hooks(
+              'post-tool\t{"stepIdx":19,"toolCall":{"name":"manage_task","args":{"Action":"kill","TaskId":"task-18"}},"toolOutput":"killed"}',
+            );
+          }
+          io.transcript(agyText(20, "The anonymous command is still running."));
+          io.hooks('stop\t{"stepIdx":20}');
+          yield* io.waitUntil(() => io.counts.assistantMessages === 1);
+          yield* Effect.sleep("150 millis");
+          expect(io.counts.teardowns).toBe(0);
+          expect(io.taskEvents).toEqual([]);
+
+          // Identifying the unrelated terminal still must not settle task-8.
+          io.transcript(agyRunningStep(18, "session/task-18"), agyText(21, "Still waiting."));
+          io.hooks('stop\t{"stepIdx":21}');
+          yield* io.waitUntil(() => io.counts.assistantMessages === 2);
+          yield* Effect.sleep("150 millis");
+          expect(io.counts.teardowns).toBe(0);
+
+          io.transcript(
+            agyRunningStep(8, "session/task-8"),
+            agyCompletionStep(22, "session/task-8"),
+            agyText(23, "All done."),
+          );
+          io.hooks('stop\t{"stepIdx":23}');
+          yield* io.waitUntil(() => io.counts.teardowns === 1);
+          expect(io.taskEvents.filter((event) => event.type === "task.completed")).toEqual([
+            ...(terminalState === "completed"
+              ? [{ type: "task.completed", taskId: "session/task-18" }]
+              : []),
+            { type: "task.completed", taskId: "session/task-8" },
+          ]);
         }),
       ),
   );
