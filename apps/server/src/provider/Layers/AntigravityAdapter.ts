@@ -823,7 +823,8 @@ export function detectAntigravityBackgroundTaskStart(
 
     if (rawOutput) {
       const match =
-        rawOutput.match(/Task id ["']?([\w.-]+)["']?/iu) ?? rawOutput.match(/\b(task-[\w.-]+)\b/iu);
+        rawOutput.match(/Task id\b:?\s*["']?([\w./:-]+)["']?/iu) ??
+        rawOutput.match(/\b(task-[\w.-]+)\b/iu);
       if (/background task|sent to the background|running in the background/iu.test(rawOutput)) {
         const taskId = match?.[1] ?? match?.[0];
         return {

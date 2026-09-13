@@ -1991,6 +1991,38 @@ describe("Antigravity background task helpers (#752)", () => {
     ).toBeNull();
   });
 
+  it.each([
+    { taskId: "session/task-8", output: "Task id 'session/task-8' is running in the background" },
+    { taskId: "session:task-8", output: 'Task id "session:task-8" is running in the background' },
+    {
+      taskId: "session/task-8",
+      output: "Tool is running as a background task with task id: session/task-8",
+    },
+    { taskId: "session/task-8", output: "Task ID:session/task-8 is running in the background" },
+  ])("preserves the full background task id in $output", ({ taskId, output }) => {
+    expect(
+      detectAntigravityBackgroundTaskStart(
+        "run_command",
+        { CommandLine: "npm run build" },
+        { toolOutput: output },
+      ),
+    ).toEqual({
+      taskId,
+      description: "npm run build",
+      isBackground: true,
+    });
+  });
+
+  it("does not extract a task id from an identifier label", () => {
+    expect(
+      detectAntigravityBackgroundTaskStart(
+        "run_command",
+        { CommandLine: "npm run build" },
+        { toolOutput: "Task identifier pending for a command running in the background" },
+      ),
+    ).toEqual({ description: "npm run build", isBackground: true });
+  });
+
   it("detects schedule timers and ignores unrelated tools", () => {
     expect(
       detectAntigravityBackgroundTaskStart(
@@ -2707,6 +2739,28 @@ describe("Antigravity background task helpers (#752)", () => {
         yield* io.waitUntil(() => io.counts.teardowns === 1);
       }),
     ));
+
+  it.each(["session/task-8", "session:task-8"])(
+    "reconciles qualified id %s in a delayed post-tool output",
+    (taskId) =>
+      runAgyBackgroundScenario(`qualified-post-id-${taskId.replaceAll(/[^\w]/g, "-")}`, (io) =>
+        Effect.gen(function* () {
+          io.transcript(agyRunningStep(8, taskId), agyText(9, "Waiting for command."));
+          yield* io.waitUntil(() => io.counts.assistantMessages === 1);
+          io.hooks(
+            `post-tool\t${JSON.stringify({ stepIdx: 7, toolCall: { name: "run_command", args: { CommandLine: agyCommand } }, toolOutput: `Task id '${taskId}' is running in the background` })}`,
+          );
+          io.transcript(agyCompletionStep(10, taskId), agyText(11, "Done."));
+          io.hooks('stop\t{"stepIdx":11}');
+          yield* io.waitUntil(() => io.counts.assistantMessages === 2);
+          expect(io.taskEvents).toEqual([
+            { type: "task.started", taskId: taskId },
+            { type: "task.completed", taskId: taskId },
+          ]);
+          yield* io.waitUntil(() => io.counts.teardowns === 1);
+        }),
+      ),
+  );
 
   it("tracks a transcript background task once when post-tool reports it too", () =>
     runAgyBackgroundScenario("agy-background-dedupe", (io) =>
