@@ -157,6 +157,8 @@ type AntigravitySessionContext = ToolSurfaceCounters & {
   settledBackgroundTaskIds: string[];
   /** Tool step indexes the transcript backgrounded before their pre-tool hook was seen. */
   transcriptBackgroundedSteps: Set<number>;
+  /** Tool step indexes whose post-tool hook registered an anonymous background task. */
+  anonymousBackgroundSteps: Set<number>;
   backgroundCompletionSequence: number;
   latestBackgroundCompletionStepIndex?: number;
   /**
@@ -1153,6 +1155,7 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
       }
       context.pendingBackgroundTasks.clear();
       context.pendingAnonymousBackgroundTasks = 0;
+      context.anonymousBackgroundSteps.clear();
       context.pendingBackgroundTaskCompletions.length = 0;
     };
 
@@ -1176,6 +1179,7 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
       }
       context.pendingBackgroundTasks.clear();
       context.pendingAnonymousBackgroundTasks = 0;
+      context.anonymousBackgroundSteps.clear();
       context.pendingBackgroundTaskCompletions.length = 0;
     };
 
@@ -1498,6 +1502,16 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
           ) ?? context.pendingTools.findLast((tool) => tool.name === "run_command");
         if (pending) {
           pending.backgroundedByTranscript = true;
+        } else if (
+          stepIndex !== undefined &&
+          context.anonymousBackgroundSteps.delete(stepIndex - 1)
+        ) {
+          // The call already completed in an earlier hook batch and was counted
+          // as an anonymous task; the named registration below supersedes it.
+          context.pendingAnonymousBackgroundTasks = Math.max(
+            0,
+            context.pendingAnonymousBackgroundTasks - 1,
+          );
         } else if (stepIndex !== undefined) {
           context.transcriptBackgroundedSteps.add(stepIndex - 1);
         }
@@ -1952,6 +1966,9 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
                   name: toolName,
                   ...(toolArgs ? { args: toolArgs } : {}),
                 });
+                if (bgStart.taskId === undefined && stepIndex !== undefined) {
+                  context.anonymousBackgroundSteps.add(stepIndex);
+                }
               }
             } else if (toolName === "manage_task") {
               const action = typeof toolArgs?.Action === "string" ? toolArgs.Action : undefined;
@@ -2101,6 +2118,7 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
           pendingBackgroundTaskCompletions: [],
           settledBackgroundTaskIds: [],
           transcriptBackgroundedSteps: new Set(),
+          anonymousBackgroundSteps: new Set(),
           backgroundCompletionSequence: 0,
           foreignConversations: new Map(),
           surfacedToolCallCounts: new Map(),
@@ -2225,6 +2243,7 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
         yield* Effect.promise(() => markExistingTranscriptStepsProcessed(context));
         context.pendingTools = [];
         context.transcriptBackgroundedSteps.clear();
+        context.anonymousBackgroundSteps.clear();
         context.pendingAnonymousBackgroundTasks = 0;
         context.pendingBackgroundTaskCompletions.length = 0;
         context.backgroundCompletionSequence = 0;

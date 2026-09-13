@@ -2399,6 +2399,31 @@ describe("Antigravity background task helpers (#752)", () => {
       }),
     ));
 
+  it("reconciles an anonymous post-tool start batched before the transcript step", () =>
+    runAgyBackgroundScenario("agy-background-batched-anonymous", (io) =>
+      Effect.gen(function* () {
+        const args = JSON.stringify({ CommandLine: agyCommand, WaitMsBeforeAsync: "5000" });
+        const toolCall = `"toolCall":{"name":"run_command","args":${args}}`;
+        // The command finished before the next poll: one hook batch holds the
+        // pre-tool, an id-less post-tool and the Stop, and the transcript already
+        // holds the background step, the wait message and the completion.
+        io.hooks(
+          `pre-tool	{"stepIdx":996,${toolCall}}`,
+          `post-tool	{"stepIdx":996,${toolCall},"toolOutput":"Command sent to the background"}`,
+          'stop	{"stepIdx":998}',
+        );
+        io.transcript(
+          agyRunningStep(997),
+          agyText(998, "Dumping native overlay hierarchy."),
+          agyCompletionStep(999),
+          agyText(1000, "Overlay dumped."),
+        );
+        yield* io.waitUntil(() => io.counts.assistantMessages === 2);
+        io.hooks('stop	{"stepIdx":1000}');
+        yield* io.waitUntil(() => io.counts.teardowns === 1);
+      }),
+    ));
+
   it("tracks a transcript background task once when post-tool reports it too", () =>
     runAgyBackgroundScenario("agy-background-dedupe", (io) =>
       Effect.gen(function* () {
