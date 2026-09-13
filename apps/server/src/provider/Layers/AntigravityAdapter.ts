@@ -153,7 +153,7 @@ type AntigravitySessionContext = ToolSurfaceCounters & {
   pendingBackgroundTasks: Map<string, AntigravityTrackedBackgroundTask>;
   pendingAnonymousBackgroundTasks: number;
   pendingBackgroundTaskCompletions: AntigravitySystemMessageInfo[];
-  /** Recently settled task ids, so a late post-tool hook cannot re-register them. */
+  /** Recently settled or killed task ids, so a late post-tool hook cannot re-register them. */
   settledBackgroundTaskIds: string[];
   backgroundCompletionSequence: number;
   latestBackgroundCompletionStepIndex?: number;
@@ -1117,6 +1117,19 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
       }).pipe(Effect.asVoid);
     };
 
+    /**
+     * Ids of tasks that already reached a terminal state. A post-tool hook can
+     * arrive after the transcript settled, killed, or force-completed a task;
+     * it must not re-register it, or nothing would ever settle it again.
+     */
+    const rememberSettledBackgroundTask = (
+      context: AntigravitySessionContext,
+      taskId: string,
+    ): void => {
+      context.settledBackgroundTaskIds.push(taskId);
+      if (context.settledBackgroundTaskIds.length > 32) context.settledBackgroundTaskIds.shift();
+    };
+
     const completePendingBackgroundTasks = (
       context: AntigravitySessionContext,
       status: "completed" | "failed" | "stopped",
@@ -1133,10 +1146,12 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
           raw: raw(source, { taskId, tracked, status }),
         } satisfies ProviderRuntimeEvent);
       }
+      for (const taskId of context.pendingBackgroundTasks.keys()) {
+        rememberSettledBackgroundTask(context, taskId);
+      }
       context.pendingBackgroundTasks.clear();
       context.pendingAnonymousBackgroundTasks = 0;
       context.pendingBackgroundTaskCompletions.length = 0;
-      context.settledBackgroundTaskIds.length = 0;
     };
 
     const killPendingBackgroundTasks = (
@@ -1154,23 +1169,17 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
           raw: raw(source, { taskId, tracked }),
         } satisfies ProviderRuntimeEvent);
       }
+      for (const taskId of context.pendingBackgroundTasks.keys()) {
+        rememberSettledBackgroundTask(context, taskId);
+      }
       context.pendingBackgroundTasks.clear();
       context.pendingAnonymousBackgroundTasks = 0;
       context.pendingBackgroundTaskCompletions.length = 0;
-      context.settledBackgroundTaskIds.length = 0;
     };
 
     const backgroundCompletionCandidate = (
       message: AntigravitySystemMessageInfo,
     ): string | undefined => message.taskId ?? message.sender;
-
-    const rememberSettledBackgroundTask = (
-      context: AntigravitySessionContext,
-      taskId: string,
-    ): void => {
-      context.settledBackgroundTaskIds.push(taskId);
-      if (context.settledBackgroundTaskIds.length > 32) context.settledBackgroundTaskIds.shift();
-    };
 
     const settleTrackedBackgroundTask = (
       context: AntigravitySessionContext,
@@ -2194,7 +2203,6 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
         context.pendingTools = [];
         context.pendingAnonymousBackgroundTasks = 0;
         context.pendingBackgroundTaskCompletions.length = 0;
-        context.settledBackgroundTaskIds.length = 0;
         context.backgroundCompletionSequence = 0;
         delete context.latestBackgroundCompletionStepIndex;
         context.nextToolSequence = 0;
