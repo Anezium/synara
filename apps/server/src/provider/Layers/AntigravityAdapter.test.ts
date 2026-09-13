@@ -2585,6 +2585,34 @@ describe("Antigravity background task helpers (#752)", () => {
       ),
   );
 
+  it("preserves the sole schedule planner call when hooks have not arrived", () =>
+    runAgyBackgroundScenario("schedule-no-hooks", (io) =>
+      Effect.gen(function* () {
+        io.transcript(
+          {
+            step_index: 996,
+            type: "PLANNER_RESPONSE",
+            tool_calls: [{ name: "schedule", args: { Prompt: "remind me" } }],
+          },
+          {
+            step_index: 997,
+            type: "GENERIC",
+            status: "RUNNING",
+            content:
+              "Tool is running as a background task with task id: session/task-997\nTask Description: remind me",
+          },
+          agyText(998, "Timer started."),
+        );
+        yield* io.waitUntil(() => io.counts.assistantMessages === 1);
+        expect(io.taskStarts).toEqual([
+          { taskType: "dynamic_tool_call", source: expect.objectContaining({ name: "schedule" }) },
+        ]);
+        io.transcript(agyCompletionStep(999, "session/task-997"), agyText(1000, "Timer finished."));
+        io.hooks('stop\t{"stepIdx":1000}');
+        yield* io.waitUntil(() => io.counts.teardowns === 1);
+      }),
+    ));
+
   it("tracks a transcript background task once when post-tool reports it too", () =>
     runAgyBackgroundScenario("agy-background-dedupe", (io) =>
       Effect.gen(function* () {

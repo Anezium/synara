@@ -1639,12 +1639,16 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
             item !== null &&
             (item as TranscriptStep).step_index === toolStep,
         );
-        const plannerCall = plannerStep?.tool_calls?.find(
-          (call) =>
-            typeof call?.name === "string" &&
-            wantedCommand !== undefined &&
-            normalizeAntigravityCommandLine(call.args?.CommandLine) === wantedCommand,
-        );
+        const plannerCalls =
+          plannerStep?.tool_calls?.filter(
+            (call) => typeof call?.name === "string" && call.name.trim().length > 0,
+          ) ?? [];
+        const plannerCall =
+          plannerCalls.find(
+            (call) =>
+              wantedCommand !== undefined &&
+              normalizeAntigravityCommandLine(call.args?.CommandLine) === wantedCommand,
+          ) ?? (plannerCalls.length === 1 ? plannerCalls[0] : undefined);
         const name = pending?.name ?? plannerCall?.name ?? "run_command";
         registerBackgroundTask(
           context,
