@@ -1560,6 +1560,7 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
 
     const readTranscript = async (context: AntigravitySessionContext) => {
       if (!context.transcriptPath) return;
+      const turnAtStart = context.activeTurnId;
       const isInitialRead = context.processedTranscriptPath !== context.transcriptPath;
       if (isInitialRead) context.processedTranscriptBytes = 0;
       let batch: Awaited<ReturnType<typeof readCompleteAntigravityLines>>;
@@ -1568,7 +1569,7 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
       } catch {
         return;
       }
-      if (context.stopped) return;
+      if (context.stopped || context.activeTurnId !== turnAtStart) return;
       context.processedTranscriptBytes = batch.nextOffset;
       context.processedTranscriptPath = context.transcriptPath;
       const steps = batch.lines.flatMap((line) => {
@@ -1774,6 +1775,9 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
     const pollHookFileOnce = async (context: AntigravitySessionContext) => {
       if (context.stopped) return;
       if (!context.eventFile) return;
+      // A read that outlives its turn (interrupt, next sendTurn) must not feed
+      // stale hooks into whatever turn is active once it resumes.
+      const turnAtStart = context.activeTurnId;
       const completionSequenceBeforePoll = context.backgroundCompletionSequence;
       let latestStopStepIndex: number | undefined;
       let sawStopWithoutStepIndex = false;
@@ -1783,7 +1787,7 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
       } catch {
         return;
       }
-      if (context.stopped) return;
+      if (context.stopped || context.activeTurnId !== turnAtStart) return;
       context.processedHookBytes = batch.nextOffset;
       for (const line of batch.lines) {
         if (context.stopped) return;
