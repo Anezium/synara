@@ -248,15 +248,108 @@ async function removeLegacyCodexOverlaySqliteLinks(overlayHomePath: string): Pro
   }
 }
 
-function isExactConfigLine(line: string, expected: string): boolean {
-  // Match whole lines only. The expected text can legitimately appear inside
-  // a TOML string value (for example in a multiline instruction) and must not
-  // be mistaken for a structural line there.
-  return (line.endsWith("\r") ? line.slice(0, -1) : line) === expected;
+type TomlMultilineDelimiter = '"""' | "'''";
+
+interface ConfigLines {
+  readonly lines: readonly string[];
+  // True when the line begins outside any TOML multiline string. Only those
+  // lines can carry structure (table headers, keys, comments, our markers);
+  // an identical line inside a multiline string is just string content.
+  readonly structural: readonly boolean[];
 }
 
-function configHasExactLine(config: string, expected: string): boolean {
-  return config.split("\n").some((line) => isExactConfigLine(line, expected));
+function countRun(line: string, index: number, char: string): number {
+  let count = 0;
+  while (line[index + count] === char) {
+    count += 1;
+  }
+  return count;
+}
+
+// Advances the multiline-string state across one line. Only string and
+// comment lexing is needed: anything else on a structural line is irrelevant
+// to marker matching, and malformed input simply keeps the current state.
+function scanTomlLine(
+  line: string,
+  open: TomlMultilineDelimiter | undefined,
+): TomlMultilineDelimiter | undefined {
+  let state = open;
+  let index = 0;
+  while (index < line.length) {
+    const char = line[index];
+    if (state === undefined) {
+      if (char === "#") {
+        return undefined;
+      }
+      if (line.startsWith('"""', index)) {
+        state = '"""';
+        index += 3;
+      } else if (line.startsWith("'''", index)) {
+        state = "'''";
+        index += 3;
+      } else if (char === '"') {
+        index += 1;
+        while (index < line.length && line[index] !== '"') {
+          index += line[index] === "\\" ? 2 : 1;
+        }
+        index += 1;
+      } else if (char === "'") {
+        const close = line.indexOf("'", index + 1);
+        if (close === -1) {
+          return undefined;
+        }
+        index = close + 1;
+      } else {
+        index += 1;
+      }
+      continue;
+    }
+    if (state === '"""' && char === "\\") {
+      index += 2;
+      continue;
+    }
+    const quotes = countRun(line, index, state[0] ?? "");
+    if (quotes >= 3) {
+      // TOML allows up to two extra quotes right before the closing delimiter.
+      state = undefined;
+      index += Math.min(quotes, 5);
+      continue;
+    }
+    index += Math.max(quotes, 1);
+  }
+  return state;
+}
+
+function splitConfigLines(config: string): ConfigLines {
+  const lines = config.split("\n");
+  const structural: boolean[] = [];
+  let open: TomlMultilineDelimiter | undefined;
+  for (const line of lines) {
+    structural.push(open === undefined);
+    open = scanTomlLine(line, open);
+  }
+  return { lines, structural };
+}
+
+// Matches whole structural lines only. The expected text can legitimately
+// appear inside a TOML string value (for example in a multiline instruction)
+// and must not be mistaken for a marker or header there.
+function findExactConfigLine(config: ConfigLines, expected: string, from = 0): number {
+  for (let index = from; index < config.lines.length; index += 1) {
+    if (!config.structural[index]) {
+      continue;
+    }
+    const line = config.lines[index] ?? "";
+    if ((line.endsWith("\r") ? line.slice(0, -1) : line) === expected) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function appendConfigBlock(config: string, block: string): string {
+  const base = config.trimEnd();
+  return base.length > 0 ? `${base}\n\n${block}\n` : `${block}\n`;
 }
 
 export function appendCodexConfigSection(config: string, section: string): string {
@@ -264,31 +357,27 @@ export function appendCodexConfigSection(config: string, section: string): strin
   if (!trimmedSection) {
     return config;
   }
-  if (configHasExactLine(config, trimmedSection.split("\n")[0] ?? trimmedSection)) {
+  const firstLine = trimmedSection.split("\n")[0] ?? trimmedSection;
+  if (findExactConfigLine(splitConfigLines(config), firstLine) !== -1) {
     return config;
   }
-  const base = config.trimEnd();
-  return base.length > 0 ? `${base}\n\n${trimmedSection}\n` : `${trimmedSection}\n`;
+  return appendConfigBlock(config, trimmedSection);
 }
 
 export const SYNARA_MANAGED_CODEX_CONFIG_BEGIN = "# >>> synara managed config >>>";
 export const SYNARA_MANAGED_CODEX_CONFIG_END = "# <<< synara managed config <<<";
 
 export function extractManagedCodexConfigSection(config: string): string | undefined {
-  const lines = config.split("\n");
-  const begin = lines.findIndex((line) =>
-    isExactConfigLine(line, SYNARA_MANAGED_CODEX_CONFIG_BEGIN),
-  );
+  const parsed = splitConfigLines(config);
+  const begin = findExactConfigLine(parsed, SYNARA_MANAGED_CODEX_CONFIG_BEGIN);
   if (begin === -1) {
     return undefined;
   }
-  const end = lines.findIndex(
-    (line, index) => index > begin && isExactConfigLine(line, SYNARA_MANAGED_CODEX_CONFIG_END),
-  );
+  const end = findExactConfigLine(parsed, SYNARA_MANAGED_CODEX_CONFIG_END, begin + 1);
   if (end === -1) {
     return undefined;
   }
-  const content = lines
+  const content = parsed.lines
     .slice(begin + 1, end)
     .join("\n")
     .trim();
@@ -627,35 +716,29 @@ function appendManagedCodexConfigSection(config: string, section: string): strin
   if (tables.length === 0) {
     return overlayConfig;
   }
-  return appendCodexConfigSection(
+  // Append directly: every complete managed block was stripped above, and an
+  // unmatched begin marker left in place must not suppress the new block.
+  return appendConfigBlock(
     overlayConfig,
     `${SYNARA_MANAGED_CODEX_CONFIG_BEGIN}\n${tables.join("\n\n")}\n${SYNARA_MANAGED_CODEX_CONFIG_END}`,
   );
 }
 
 function removeManagedCodexConfigSections(config: string): string {
-  const lines = config.split("\n");
+  const parsed = splitConfigLines(config);
   const kept: string[] = [];
   let index = 0;
-  while (index < lines.length) {
-    const line = lines[index] ?? "";
-    if (!isExactConfigLine(line, SYNARA_MANAGED_CODEX_CONFIG_BEGIN)) {
-      kept.push(line);
-      index += 1;
-      continue;
-    }
-    let end = index + 1;
-    while (
-      end < lines.length &&
-      !isExactConfigLine(lines[end] ?? "", SYNARA_MANAGED_CODEX_CONFIG_END)
-    ) {
-      end += 1;
-    }
-    if (end === lines.length) {
-      // Do not discard user config after an incomplete marker.
-      kept.push(...lines.slice(index));
+  while (index < parsed.lines.length) {
+    const begin = findExactConfigLine(parsed, SYNARA_MANAGED_CODEX_CONFIG_BEGIN, index);
+    const end =
+      begin === -1 ? -1 : findExactConfigLine(parsed, SYNARA_MANAGED_CODEX_CONFIG_END, begin + 1);
+    if (end === -1) {
+      // No further complete block. Keep everything, including any unmatched
+      // begin marker, so user config after a truncated block is never lost.
+      kept.push(...parsed.lines.slice(index));
       break;
     }
+    kept.push(...parsed.lines.slice(index, begin));
     index = end + 1;
   }
   return kept.join("\n");
