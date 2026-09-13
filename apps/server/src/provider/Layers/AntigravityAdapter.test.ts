@@ -2439,9 +2439,10 @@ describe("Antigravity background task helpers (#752)", () => {
         );
         io.transcript(agyRunningStep(997), agyText(998, "Dumping native overlay hierarchy."));
         yield* io.waitUntil(() => io.counts.assistantMessages === 1);
+        // The backgrounded call reports first, out of issue order.
         io.hooks(
-          `post-tool	{"stepIdx":996,"toolCall":{"name":"run_command","args":${quick}},"toolOutput":"The command exited with code 0."}`,
           `post-tool	{"stepIdx":996,"toolCall":{"name":"run_command","args":${slow}},"toolOutput":"Command sent to the background"}`,
+          `post-tool	{"stepIdx":996,"toolCall":{"name":"run_command","args":${quick}},"toolOutput":"The command exited with code 0."}`,
           'stop	{"stepIdx":998}',
         );
         yield* Effect.sleep("200 millis");

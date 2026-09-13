@@ -1928,12 +1928,25 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
             toolCall?.args && typeof toolCall.args === "object"
               ? (toolCall.args as Record<string, unknown>)
               : undefined;
+          // Several same-name calls can share a step and finish out of order:
+          // prefer the pending call with the same command line, then FIFO.
+          const matchesHook = (candidate: PendingTool) =>
+            candidate.stepIndex === stepIndex && (!name || candidate.name === name);
+          const hookCommand = normalizeAntigravityCommandLine(hookArgs?.CommandLine);
+          const exactIndex =
+            stepIndex === undefined || hookCommand === undefined
+              ? -1
+              : context.pendingTools.findIndex(
+                  (candidate) =>
+                    matchesHook(candidate) &&
+                    normalizeAntigravityCommandLine(candidate.args?.CommandLine) === hookCommand,
+                );
           const pendingIndex =
             stepIndex === undefined
               ? -1
-              : context.pendingTools.findIndex(
-                  (pending) => pending.stepIndex === stepIndex && (!name || pending.name === name),
-                );
+              : exactIndex >= 0
+                ? exactIndex
+                : context.pendingTools.findIndex(matchesHook);
           const pending =
             pendingIndex >= 0 ? context.pendingTools.splice(pendingIndex, 1)[0] : undefined;
           const toolName = pending?.name ?? name;
