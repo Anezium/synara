@@ -153,6 +153,8 @@ type AntigravitySessionContext = ToolSurfaceCounters & {
   pendingBackgroundTasks: Map<string, AntigravityTrackedBackgroundTask>;
   pendingAnonymousBackgroundTasks: number;
   pendingBackgroundTaskCompletions: AntigravitySystemMessageInfo[];
+  /** Recently settled task ids, so a late post-tool hook cannot re-register them. */
+  settledBackgroundTaskIds: string[];
   backgroundCompletionSequence: number;
   latestBackgroundCompletionStepIndex?: number;
   /**
@@ -1134,6 +1136,7 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
       context.pendingBackgroundTasks.clear();
       context.pendingAnonymousBackgroundTasks = 0;
       context.pendingBackgroundTaskCompletions.length = 0;
+      context.settledBackgroundTaskIds.length = 0;
     };
 
     const killPendingBackgroundTasks = (
@@ -1154,6 +1157,7 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
       context.pendingBackgroundTasks.clear();
       context.pendingAnonymousBackgroundTasks = 0;
       context.pendingBackgroundTaskCompletions.length = 0;
+      context.settledBackgroundTaskIds.length = 0;
     };
 
     const backgroundCompletionCandidate = (
@@ -1168,6 +1172,8 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
       const tracked = context.pendingBackgroundTasks.get(taskId);
       if (!tracked) return false;
       context.pendingBackgroundTasks.delete(taskId);
+      context.settledBackgroundTaskIds.push(taskId);
+      if (context.settledBackgroundTaskIds.length > 32) context.settledBackgroundTaskIds.shift();
       offer({
         ...base(context),
         type: "task.completed",
@@ -1896,10 +1902,19 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
           if (!failed && toolName && !pending?.backgroundedByTranscript) {
             const bgStart = detectAntigravityBackgroundTaskStart(toolName, toolArgs, payload);
             if (bgStart?.isBackground) {
-              registerBackgroundTask(context, bgStart, toolItemType(toolName), {
-                name: toolName,
-                ...(toolArgs ? { args: toolArgs } : {}),
-              });
+              // Without a pre-tool entry the marker above cannot help: a hook that
+              // arrives after the transcript already settled the task must not
+              // re-register it, or nothing would ever settle it again.
+              const settled = matchAntigravityTrackedTaskId(
+                bgStart.taskId,
+                context.settledBackgroundTaskIds,
+              );
+              if (!settled) {
+                registerBackgroundTask(context, bgStart, toolItemType(toolName), {
+                  name: toolName,
+                  ...(toolArgs ? { args: toolArgs } : {}),
+                });
+              }
             } else if (toolName === "manage_task") {
               const action = typeof toolArgs?.Action === "string" ? toolArgs.Action : undefined;
               const targetTaskId =
@@ -2045,6 +2060,7 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
           pendingBackgroundTasks: new Map(),
           pendingAnonymousBackgroundTasks: 0,
           pendingBackgroundTaskCompletions: [],
+          settledBackgroundTaskIds: [],
           backgroundCompletionSequence: 0,
           foreignConversations: new Map(),
           surfacedToolCallCounts: new Map(),
@@ -2170,6 +2186,7 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
         context.pendingTools = [];
         context.pendingAnonymousBackgroundTasks = 0;
         context.pendingBackgroundTaskCompletions.length = 0;
+        context.settledBackgroundTaskIds.length = 0;
         context.backgroundCompletionSequence = 0;
         delete context.latestBackgroundCompletionStepIndex;
         context.nextToolSequence = 0;
