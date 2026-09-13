@@ -155,6 +155,8 @@ type AntigravitySessionContext = ToolSurfaceCounters & {
   pendingBackgroundTaskCompletions: AntigravitySystemMessageInfo[];
   /** Recently settled or killed task ids, so a late post-tool hook cannot re-register them. */
   settledBackgroundTaskIds: string[];
+  /** Tool step indexes the transcript backgrounded before their pre-tool hook was seen. */
+  transcriptBackgroundedSteps: Set<number>;
   backgroundCompletionSequence: number;
   latestBackgroundCompletionStepIndex?: number;
   /**
@@ -1494,7 +1496,11 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
           context.pendingTools.find(
             (tool) => stepIndex !== undefined && tool.stepIndex === stepIndex - 1,
           ) ?? context.pendingTools.findLast((tool) => tool.name === "run_command");
-        if (pending) pending.backgroundedByTranscript = true;
+        if (pending) {
+          pending.backgroundedByTranscript = true;
+        } else if (stepIndex !== undefined) {
+          context.transcriptBackgroundedSteps.add(stepIndex - 1);
+        }
         const command = pending?.args?.CommandLine;
         const description =
           backgroundStart.description ?? (typeof command === "string" ? command : undefined);
@@ -1848,13 +1854,17 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
               `antigravity-${context.activeTurnId ?? "turn"}-tool-${context.nextToolSequence++}`,
             );
             const itemType = toolItemType(name);
-            const pending = {
+            const pending: PendingTool = {
               stepIndex,
               itemId,
               itemType,
               name,
               ...(toolArgs ? { args: toolArgs } : {}),
-            } satisfies PendingTool;
+            };
+            // The transcript may report the background start before this hook is read.
+            if (stepIndex !== undefined && context.transcriptBackgroundedSteps.delete(stepIndex)) {
+              pending.backgroundedByTranscript = true;
+            }
             context.pendingTools.push(pending);
             offer({
               ...base(context, { itemId }),
@@ -2080,6 +2090,7 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
           pendingAnonymousBackgroundTasks: 0,
           pendingBackgroundTaskCompletions: [],
           settledBackgroundTaskIds: [],
+          transcriptBackgroundedSteps: new Set(),
           backgroundCompletionSequence: 0,
           foreignConversations: new Map(),
           surfacedToolCallCounts: new Map(),
@@ -2203,6 +2214,7 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
         context.processedSteps.clear();
         yield* Effect.promise(() => markExistingTranscriptStepsProcessed(context));
         context.pendingTools = [];
+        context.transcriptBackgroundedSteps.clear();
         context.pendingAnonymousBackgroundTasks = 0;
         context.pendingBackgroundTaskCompletions.length = 0;
         context.backgroundCompletionSequence = 0;

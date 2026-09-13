@@ -2357,6 +2357,28 @@ describe("Antigravity background task helpers (#752)", () => {
       }),
     ));
 
+  it("marks a pre-tool hook read after the transcript backgrounded its call", () =>
+    runAgyBackgroundScenario("agy-background-late-pre-tool", (io) =>
+      Effect.gen(function* () {
+        io.transcript(agyRunningStep(997), agyText(998, "Dumping native overlay hierarchy."));
+        yield* io.waitUntil(() => io.counts.assistantMessages === 1);
+        const args = JSON.stringify({ CommandLine: agyCommand, WaitMsBeforeAsync: "5000" });
+        const toolCall = `"toolCall":{"name":"run_command","args":${args}}`;
+        io.hooks(`pre-tool	{"stepIdx":996,${toolCall}}`, 'stop	{"stepIdx":998}');
+        yield* Effect.sleep("200 millis");
+        expect(io.counts.teardowns).toBe(0);
+
+        io.transcript(agyCompletionStep(999), agyText(1000, "Overlay dumped."));
+        yield* io.waitUntil(() => io.counts.assistantMessages === 2);
+        // The post-tool reports the background start without a task id.
+        io.hooks(
+          `post-tool	{"stepIdx":996,${toolCall},"toolOutput":"Command sent to the background"}`,
+          'stop	{"stepIdx":1000}',
+        );
+        yield* io.waitUntil(() => io.counts.teardowns === 1);
+      }),
+    ));
+
   it("tracks a transcript background task once when post-tool reports it too", () =>
     runAgyBackgroundScenario("agy-background-dedupe", (io) =>
       Effect.gen(function* () {
