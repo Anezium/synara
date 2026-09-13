@@ -2542,6 +2542,101 @@ describe("Antigravity background task helpers (#752)", () => {
       }),
     ));
 
+  it.each([
+    { preHooks: "before", foregroundFirst: false },
+    { preHooks: "before", foregroundFirst: true },
+    { preHooks: "after", foregroundFirst: false },
+    { preHooks: "after", foregroundFirst: true },
+    { preHooks: "after-no-planner", foregroundFirst: false },
+    { preHooks: "after-no-planner", foregroundFirst: true },
+    { preHooks: "split", foregroundFirst: false },
+    { preHooks: "split", foregroundFirst: true },
+  ])(
+    "reconciles a background start without a description ($preHooks pre-hooks, foreground first: $foregroundFirst)",
+    ({ preHooks, foregroundFirst }) =>
+      runAgyBackgroundScenario(`no-description-${preHooks}-${foregroundFirst}`, (io) =>
+        Effect.gen(function* () {
+          const calls = [
+            { name: "run_command", args: { CommandLine: "echo foreground" } },
+            { name: "run_command", args: { CommandLine: agyCommand } },
+          ];
+          const pre = calls.map(
+            (toolCall) => `pre-tool\t${JSON.stringify({ stepIdx: 996, toolCall })}`,
+          );
+          if (preHooks === "before") io.hooks(...pre);
+          if (preHooks === "split") io.hooks(pre[0]!);
+          io.transcript(
+            ...(preHooks === "after-no-planner"
+              ? []
+              : [{ step_index: 996, type: "PLANNER_RESPONSE", tool_calls: calls }]),
+            {
+              ...agyRunningStep(997),
+              content: `Tool is running as a background task with task id: ${agyTaskId}`,
+            },
+            agyText(998, "Waiting for the background command."),
+          );
+          yield* io.waitUntil(() => io.counts.assistantMessages === 1);
+          if (preHooks === "after" || preHooks === "after-no-planner") io.hooks(...pre);
+          if (preHooks === "split") io.hooks(pre[1]!);
+          const post = calls.map(
+            (toolCall, index) =>
+              `post-tool\t${JSON.stringify({ stepIdx: 996, toolCall, toolOutput: index === 0 ? "The command exited with code 0." : "Command sent to the background" })}`,
+          );
+          io.hooks(...(foregroundFirst ? post : post.toReversed()), 'stop\t{"stepIdx":998}');
+          yield* Effect.sleep("200 millis");
+          expect(io.counts.teardowns).toBe(0);
+          expect(io.taskEvents).toEqual([{ type: "task.started", taskId: agyTaskId }]);
+
+          io.transcript(agyCompletionStep(999), agyText(1000, "Done."));
+          io.hooks('stop\t{"stepIdx":1000}');
+          yield* io.waitUntil(() => io.counts.teardowns === 1);
+          expect(io.taskEvents).toEqual([
+            { type: "task.started", taskId: agyTaskId },
+            { type: "task.completed", taskId: agyTaskId },
+          ]);
+        }),
+      ),
+  );
+
+  it("does not consume a description-less marker for a different named background task", () =>
+    runAgyBackgroundScenario("no-description-other-task", (io) =>
+      Effect.gen(function* () {
+        const calls = [
+          { name: "run_command", args: { CommandLine: agyCommand } },
+          { name: "run_command", args: { CommandLine: "npm run build" } },
+        ];
+        io.hooks(
+          ...calls.map((toolCall) => `pre-tool\t${JSON.stringify({ stepIdx: 996, toolCall })}`),
+        );
+        io.transcript(
+          { step_index: 996, type: "PLANNER_RESPONSE", tool_calls: calls },
+          {
+            ...agyRunningStep(997),
+            content: `Tool is running as a background task with task id: ${agyTaskId}`,
+          },
+          agyText(998, "Waiting for both commands."),
+        );
+        yield* io.waitUntil(() => io.counts.assistantMessages === 1);
+        io.hooks(
+          `post-tool\t${JSON.stringify({ stepIdx: 996, toolCall: calls[1], toolOutput: "Task id 'task-other' is running in the background" })}`,
+          `post-tool\t${JSON.stringify({ stepIdx: 996, toolCall: calls[0], toolOutput: "Command sent to the background" })}`,
+        );
+        io.transcript(agyCompletionStep(999), agyText(1000, "The build is still running."));
+        io.hooks('stop\t{"stepIdx":1000}');
+        yield* io.waitUntil(() => io.counts.assistantMessages === 2);
+        yield* Effect.sleep("150 millis");
+        expect(io.counts.teardowns).toBe(0);
+        expect(io.taskEvents).toEqual([
+          { type: "task.started", taskId: agyTaskId },
+          { type: "task.started", taskId: "task-other" },
+          { type: "task.completed", taskId: agyTaskId },
+        ]);
+        io.transcript(agyCompletionStep(1001, "task-other"), agyText(1002, "Done."));
+        io.hooks('stop\t{"stepIdx":1002}');
+        yield* io.waitUntil(() => io.counts.teardowns === 1);
+      }),
+    ));
+
   it.each(["matched", "unmatched", "missing-description"])(
     "derives the background task type from its planner command before hooks arrive (%s)",
     (scenario) =>
@@ -2924,33 +3019,38 @@ describe("Antigravity background task helpers (#752)", () => {
       ),
   );
 
-  it("retains early anonymous completions beyond the unmatched-message history limit", () =>
-    runAgyBackgroundScenario("early-completion-many", (io) =>
-      Effect.gen(function* () {
-        const taskCount = 33;
-        for (let index = 0; index < taskCount; index += 1) {
-          io.hooks(
-            `post-tool\t${JSON.stringify({ stepIdx: index * 3, toolCall: { name: "run_command", args: { CommandLine: agyCommand } }, toolOutput: "Command sent to the background" })}`,
+  it.each([false, true])(
+    "retains more than 32 early completions (anonymous hooks: %s)",
+    (anonymousHooks) =>
+      runAgyBackgroundScenario(`early-completion-many-${anonymousHooks}`, (io) =>
+        Effect.gen(function* () {
+          const taskCount = 33;
+          if (anonymousHooks) {
+            for (let index = 0; index < taskCount; index += 1) {
+              io.hooks(
+                `post-tool\t${JSON.stringify({ stepIdx: index * 3, toolCall: { name: "run_command", args: { CommandLine: agyCommand } }, toolOutput: "Command sent to the background" })}`,
+              );
+            }
+          }
+          for (let index = 0; index < taskCount; index += 1) {
+            io.transcript(agyCompletionStep(index * 3 + 2, `session/task-${index}`));
+          }
+          for (let index = 0; index < taskCount; index += 1) {
+            io.transcript(agyRunningStep(index * 3 + 1, `session/task-${index}`));
+          }
+          io.transcript(agyText(100, "All commands completed."));
+          io.hooks('stop\t{"stepIdx":100}');
+          yield* io.waitUntil(() => io.counts.assistantMessages === 1);
+          expect(io.taskEvents.filter((event) => event.type === "task.started")).toHaveLength(
+            taskCount,
           );
-        }
-        for (let index = 0; index < taskCount; index += 1) {
-          io.transcript(agyCompletionStep(index * 3 + 2, `session/task-${index}`));
-        }
-        for (let index = 0; index < taskCount; index += 1) {
-          io.transcript(agyRunningStep(index * 3 + 1, `session/task-${index}`));
-        }
-        io.transcript(agyText(100, "All commands completed."));
-        io.hooks('stop\t{"stepIdx":100}');
-        yield* io.waitUntil(() => io.counts.assistantMessages === 1);
-        expect(io.taskEvents.filter((event) => event.type === "task.started")).toHaveLength(
-          taskCount,
-        );
-        expect(io.taskEvents.filter((event) => event.type === "task.completed")).toHaveLength(
-          taskCount,
-        );
-        yield* io.waitUntil(() => io.counts.teardowns === 1);
-      }),
-    ));
+          expect(io.taskEvents.filter((event) => event.type === "task.completed")).toHaveLength(
+            taskCount,
+          );
+          yield* io.waitUntil(() => io.counts.teardowns === 1);
+        }),
+      ),
+  );
 
   it("ignores the old stop hook after a transcript read outlives its turn", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "synara-audit1170-stale-stop-"));

@@ -120,11 +120,6 @@ type BackgroundTaskTerminal = { readonly taskId: string } & (
   | { readonly kind: "killed" }
 );
 
-type PendingBackgroundTaskTerminal = BackgroundTaskTerminal & {
-  /** Retain this identity while anonymous starts observed at arrival still need matching. */
-  readonly anonymousThroughSequence?: number;
-};
-
 type ToolSurfaceCounters = {
   /** Highest occurrence already rendered for each `${stepIndex}:${toolName}` pair. */
   surfacedToolCallCounts: Map<string, number>;
@@ -161,9 +156,8 @@ type AntigravitySessionContext = ToolSurfaceCounters & {
   pendingTools: PendingTool[];
   nextToolSequence: number;
   pendingBackgroundTasks: Map<string, AntigravityTrackedBackgroundTask>;
-  pendingAnonymousBackgroundTasks: AnonymousBackgroundTask[];
-  nextAnonymousBackgroundSequence: number;
-  pendingBackgroundTaskTerminals: PendingBackgroundTaskTerminal[];
+  pendingAnonymousBackgroundTasks: AntigravityBackgroundCallKey[];
+  pendingBackgroundTaskTerminals: BackgroundTaskTerminal[];
   /** Recently settled or killed task ids, so a late post-tool hook cannot re-register them. */
   settledBackgroundTaskIds: string[];
   /** Calls the transcript backgrounded before their pre-tool hook was seen. */
@@ -892,27 +886,33 @@ export function parseAntigravityBackgroundTaskStep(
 /**
  * Identifies one tool call across the transcript and the hook file: the
  * planner step it belongs to, plus its command line when several calls share
- * that step. A key without a command line matches any call at the step.
+ * that step. Unspecified commands match only when the caller permits it.
  */
 export type AntigravityBackgroundCallKey = {
   readonly stepIndex: number | undefined;
   readonly command?: string;
-};
-
-type AnonymousBackgroundTask = AntigravityBackgroundCallKey & {
-  readonly sequence: number;
+  readonly taskId?: string;
 };
 
 export function takeAntigravityBackgroundCallKey(
   keys: AntigravityBackgroundCallKey[],
   stepIndex: number | undefined,
   command: string | undefined,
+  options: {
+    readonly allowUnspecifiedCommand?: boolean;
+    readonly taskId?: string | undefined;
+  } = {},
 ): boolean {
   if (stepIndex === undefined) return false;
   const index = keys.findIndex(
     (key) =>
       key.stepIndex === stepIndex &&
-      (key.command === undefined || command === undefined || key.command === command),
+      (key.taskId === undefined ||
+        options.taskId === undefined ||
+        matchAntigravityTrackedTaskId(options.taskId, [key.taskId]) !== undefined) &&
+      (key.command === undefined || command === undefined
+        ? options.allowUnspecifiedCommand !== false
+        : key.command === command),
   );
   if (index < 0) return false;
   keys.splice(index, 1);
@@ -1268,27 +1268,11 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
         )
       )
         return false;
-      const anonymousThroughSequence = context.pendingAnonymousBackgroundTasks.at(-1)?.sequence;
-      context.pendingBackgroundTaskTerminals.push({
-        ...terminal,
-        ...(anonymousThroughSequence !== undefined ? { anonymousThroughSequence } : {}),
-      });
-      // Keep terminal identities until delayed transcript starts can match them.
+      // Retain every unmatched terminal until its start arrives or the turn ends,
+      // even if no capture hooks were read. A history cap can lose the only finish.
       // An unmatched terminal may belong to a different task, so it cannot settle
       // an anonymous call or allow Stop to tear down the process before that match.
-      const oldestAnonymousSequence = context.pendingAnonymousBackgroundTasks[0]?.sequence;
-      const unmatched = context.pendingBackgroundTaskTerminals.filter(
-        (pending) =>
-          pending.anonymousThroughSequence === undefined ||
-          oldestAnonymousSequence === undefined ||
-          pending.anonymousThroughSequence < oldestAnonymousSequence,
-      );
-      if (unmatched.length > 32) {
-        context.pendingBackgroundTaskTerminals.splice(
-          context.pendingBackgroundTaskTerminals.indexOf(unmatched[0]!),
-          1,
-        );
-      }
+      context.pendingBackgroundTaskTerminals.push(terminal);
       return true;
     };
 
@@ -1325,7 +1309,6 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
       if (!start.taskId) {
         const command = normalizeAntigravityCommandLine(source.args?.CommandLine);
         context.pendingAnonymousBackgroundTasks.push({
-          sequence: context.nextAnonymousBackgroundSequence++,
           stepIndex: source.stepIndex,
           ...(command !== undefined ? { command } : {}),
         });
@@ -1614,12 +1597,13 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
         const toolStep = stepIndex === undefined ? undefined : stepIndex - 1;
         const candidates = context.pendingTools.filter((tool) => tool.stepIndex === toolStep);
         const wantedCommand = normalizeAntigravityCommandLine(backgroundStart.description);
-        const pending =
-          candidates.find(
-            (tool) =>
-              wantedCommand !== undefined &&
-              normalizeAntigravityCommandLine(tool.args?.CommandLine) === wantedCommand,
-          ) ?? (candidates.length === 1 ? candidates[0] : undefined);
+        // A lone pending call may just be the first hook read from a multi-call
+        // planner step. Without a command match, defer ownership to the post-hook.
+        const pending = candidates.find(
+          (tool) =>
+            wantedCommand !== undefined &&
+            normalizeAntigravityCommandLine(tool.args?.CommandLine) === wantedCommand,
+        );
         const replacesAnonymousTask =
           pending === undefined && takeAnonymousBackgroundTask(context, toolStep, wantedCommand);
         if (pending) {
@@ -1627,6 +1611,7 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
         } else if (!replacesAnonymousTask && toolStep !== undefined) {
           context.transcriptBackgroundedCalls.push({
             stepIndex: toolStep,
+            taskId: backgroundStart.taskId,
             ...(wantedCommand !== undefined ? { command: wantedCommand } : {}),
           });
         }
@@ -2013,12 +1998,14 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
               name,
               ...(toolArgs ? { args: toolArgs } : {}),
             };
-            // The transcript may report the background start before this hook is read.
+            // Only a command match can identify a late pre-hook. A step-only
+            // marker must wait until a post-hook confirms background execution.
             if (
               takeAntigravityBackgroundCallKey(
                 context.transcriptBackgroundedCalls,
                 stepIndex,
                 normalizeAntigravityCommandLine(toolArgs?.CommandLine),
+                { allowUnspecifiedCommand: false },
               )
             ) {
               pending.backgroundedByTranscript = true;
@@ -2097,19 +2084,25 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
             } satisfies ProviderRuntimeEvent);
           }
 
-          // A transcript-registered task's post-tool hook reports its end, not a new
-          // start. Without a pending entry (lost pre-tool hook) the step marker
-          // left by the transcript identifies the call instead.
+          const bgStart =
+            !failed && toolName
+              ? detectAntigravityBackgroundTaskStart(toolName, toolArgs, payload)
+              : null;
+          // An unmarked pending call can still own a transcript marker. Consume
+          // an unspecified command only for background output, so a foreground
+          // call sharing the step cannot take another call's marker.
           const transcriptOwned =
             pending?.backgroundedByTranscript === true ||
-            (pending === undefined &&
-              takeAntigravityBackgroundCallKey(
-                context.transcriptBackgroundedCalls,
-                stepIndex,
-                hookCommand,
-              ));
+            takeAntigravityBackgroundCallKey(
+              context.transcriptBackgroundedCalls,
+              stepIndex,
+              normalizeAntigravityCommandLine(toolArgs?.CommandLine),
+              {
+                allowUnspecifiedCommand: bgStart?.isBackground === true,
+                taskId: bgStart?.taskId,
+              },
+            );
           if (!failed && toolName && !transcriptOwned) {
-            const bgStart = detectAntigravityBackgroundTaskStart(toolName, toolArgs, payload);
             if (bgStart?.isBackground) {
               // Without a pre-tool entry the marker above cannot help: a hook that
               // arrives after the transcript already settled the task must not
@@ -2274,7 +2267,6 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
           nextToolSequence: 0,
           pendingBackgroundTasks: new Map(),
           pendingAnonymousBackgroundTasks: [],
-          nextAnonymousBackgroundSequence: 0,
           pendingBackgroundTaskTerminals: [],
           settledBackgroundTaskIds: [],
           transcriptBackgroundedCalls: [],
@@ -2403,7 +2395,6 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
         context.pendingTools = [];
         context.transcriptBackgroundedCalls.length = 0;
         context.pendingAnonymousBackgroundTasks.length = 0;
-        context.nextAnonymousBackgroundSequence = 0;
         context.pendingBackgroundTaskTerminals.length = 0;
         context.backgroundCompletionSequence = 0;
         delete context.latestBackgroundCompletionStepIndex;
