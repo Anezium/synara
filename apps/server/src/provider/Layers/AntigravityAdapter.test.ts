@@ -2201,6 +2201,7 @@ describe("Antigravity background task helpers (#752)", () => {
       readonly transcript: (...steps: object[]) => void;
       readonly waitUntil: (check: () => boolean) => Effect.Effect<void>;
       readonly counts: { teardowns: number; assistantMessages: number };
+      readonly taskEvents: { type: string; taskId: string }[];
     }) => Effect.Effect<void>,
   ) => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), `synara-antigravity-${label}-`));
@@ -2209,6 +2210,7 @@ describe("Antigravity background task helpers (#752)", () => {
     let eventFile: string | undefined;
     let child: ChildProcess | undefined;
     const counts = { teardowns: 0, assistantMessages: 0 };
+    const taskEvents: { type: string; taskId: string }[] = [];
     const spawnProcess = ((
       _command: string,
       _args: readonly string[],
@@ -2242,6 +2244,9 @@ describe("Antigravity background task helpers (#752)", () => {
             Stream.runForEach((event) =>
               Effect.sync(() => {
                 if (event.type === "turn.completed") turnsCompleted += 1;
+                if (event.type === "task.started" || event.type === "task.completed") {
+                  taskEvents.push({ type: event.type, taskId: event.payload.taskId });
+                }
                 if (
                   event.type === "item.completed" &&
                   event.payload.itemType === "assistant_message"
@@ -2273,6 +2278,7 @@ describe("Antigravity background task helpers (#752)", () => {
             transcript: (...steps) => append(transcriptFile, steps),
             waitUntil,
             counts,
+            taskEvents,
           });
           yield* Effect.sleep("200 millis");
           expect(counts.teardowns).toBe(1);
@@ -2531,6 +2537,362 @@ describe("Antigravity background task helpers (#752)", () => {
         yield* io.waitUntil(() => io.counts.teardowns === 1);
       }),
     ));
+
+  it("retains a completion consumed before an anonymous task receives its transcript id", () =>
+    runAgyBackgroundScenario("audit-anonymous-early-completion", (io) =>
+      Effect.gen(function* () {
+        const args = JSON.stringify({ CommandLine: agyCommand, WaitMsBeforeAsync: "5000" });
+        const toolCall = `"toolCall":{"name":"run_command","args":${args}}`;
+        io.hooks(
+          `pre-tool\t{"stepIdx":7,${toolCall}}`,
+          `post-tool\t{"stepIdx":7,${toolCall},"toolOutput":"Command sent to the background"}`,
+          'stop\t{"stepIdx":10}',
+        );
+        io.transcript(
+          agyCompletionStep(9, "session-b/task-8"),
+          agyRunningStep(8, "session-b/task-8"),
+          agyText(10, "Command finished."),
+        );
+        yield* io.waitUntil(() => io.counts.assistantMessages === 1);
+        yield* Effect.sleep("250 millis");
+        expect(io.counts.teardowns).toBe(1);
+        expect(io.taskEvents).toEqual([
+          { type: "task.started", taskId: "session-b/task-8" },
+          { type: "task.completed", taskId: "session-b/task-8" },
+        ]);
+      }),
+    ));
+
+  it.each([false, true])(
+    "keeps another anonymous task pending after early completion (reverse starts: %s)",
+    (reverseStarts) =>
+      runAgyBackgroundScenario(`early-completion-two-${reverseStarts}`, (io) =>
+        Effect.gen(function* () {
+          for (const stepIdx of [7, 17]) {
+            io.hooks(
+              `post-tool\t${JSON.stringify({ stepIdx, toolCall: { name: "run_command", args: { CommandLine: agyCommand } }, toolOutput: "Command sent to the background" })}`,
+            );
+          }
+          const starts = [
+            agyRunningStep(8, "session/task-8"),
+            agyRunningStep(18, "session/task-18"),
+          ];
+          io.transcript(
+            agyCompletionStep(9, "session/task-8"),
+            ...(reverseStarts ? starts.reverse() : starts),
+            agyText(20, "The other command is still running."),
+          );
+          io.hooks('stop\t{"stepIdx":20}');
+          yield* io.waitUntil(() => io.counts.assistantMessages === 1);
+          expect(io.taskEvents.filter((event) => event.type === "task.completed")).toEqual([
+            { type: "task.completed", taskId: "session/task-8" },
+          ]);
+          yield* Effect.sleep("150 millis");
+          expect(io.counts.teardowns).toBe(0);
+          io.transcript(
+            agyCompletionStep(21, "session/task-18"),
+            agyText(22, "Both commands completed."),
+          );
+          io.hooks('stop\t{"stepIdx":22}');
+          yield* io.waitUntil(() => io.counts.teardowns === 1);
+          expect(io.taskEvents.filter((event) => event.type === "task.completed")).toEqual([
+            { type: "task.completed", taskId: "session/task-8" },
+            { type: "task.completed", taskId: "session/task-18" },
+          ]);
+        }),
+      ),
+  );
+
+  it.each([false, true])(
+    "does not spend an unrelated named completion on an anonymous command (anonymous named first: %s)",
+    (anonymousNamedFirst) =>
+      runAgyBackgroundScenario(`early-completion-unrelated-${anonymousNamedFirst}`, (io) =>
+        Effect.gen(function* () {
+          io.hooks(
+            `post-tool\t${JSON.stringify({ stepIdx: 7, toolCall: { name: "run_command", args: { CommandLine: agyCommand } }, toolOutput: "Command sent to the background" })}`,
+          );
+          io.transcript(
+            agyCompletionStep(19, "session/task-18"),
+            ...(anonymousNamedFirst ? [agyRunningStep(8, "session/task-8")] : []),
+            agyRunningStep(18, "session/task-18"),
+            agyText(20, "The anonymous command is still running."),
+          );
+          io.hooks('stop\t{"stepIdx":20}');
+          yield* io.waitUntil(() => io.counts.assistantMessages === 1);
+          expect(io.taskEvents.filter((event) => event.type === "task.completed")).toEqual([
+            { type: "task.completed", taskId: "session/task-18" },
+          ]);
+          yield* Effect.sleep("150 millis");
+          expect(io.counts.teardowns).toBe(0);
+          io.transcript(
+            ...(!anonymousNamedFirst ? [agyRunningStep(8, "session/task-8")] : []),
+            agyCompletionStep(21, "session/task-8"),
+            agyText(22, "All done."),
+          );
+          io.hooks('stop\t{"stepIdx":22}');
+          yield* io.waitUntil(() => io.counts.teardowns === 1);
+        }),
+      ),
+  );
+
+  it.each([7, undefined])(
+    "does not credit a later anonymous command with an old completion (first hook step: %s)",
+    (stepIdx) =>
+      runAgyBackgroundScenario(`early-completion-later-${stepIdx}`, (io) =>
+        Effect.gen(function* () {
+          io.hooks(
+            `post-tool\t${JSON.stringify({ stepIdx, toolCall: { name: "run_command", args: { CommandLine: agyCommand } }, toolOutput: "Command sent to the background" })}`,
+          );
+          io.transcript(
+            agyCompletionStep(19, "session/task-18"),
+            agyRunningStep(8, "session/task-8"),
+            agyText(20, "First command is running."),
+          );
+          yield* io.waitUntil(() => io.counts.assistantMessages === 1);
+          io.hooks(
+            `post-tool\t${JSON.stringify({ stepIdx: 27, toolCall: { name: "run_command", args: { CommandLine: agyCommand } }, toolOutput: "Command sent to the background" })}`,
+          );
+          io.transcript(
+            agyCompletionStep(21, "session/task-8"),
+            agyText(30, "New command is still running."),
+          );
+          io.hooks('stop\t{"stepIdx":30}');
+          yield* io.waitUntil(() => io.counts.assistantMessages === 2);
+          yield* Effect.sleep("150 millis");
+          expect(io.counts.teardowns).toBe(0);
+          io.transcript(
+            agyRunningStep(18, "session/task-18"),
+            agyCompletionStep(29, "session/task-28"),
+            agyRunningStep(28, "session/task-28"),
+            agyText(31, "Everything completed."),
+          );
+          io.hooks('stop\t{"stepIdx":31}');
+          yield* io.waitUntil(() => io.counts.teardowns === 1);
+          expect(io.taskEvents.filter((event) => event.type === "task.completed")).toEqual([
+            { type: "task.completed", taskId: "session/task-8" },
+            { type: "task.completed", taskId: "session/task-18" },
+            { type: "task.completed", taskId: "session/task-28" },
+          ]);
+        }),
+      ),
+  );
+
+  it("does not use a repeated completion to settle a second anonymous command", () =>
+    runAgyBackgroundScenario("early-completion-duplicate", (io) =>
+      Effect.gen(function* () {
+        for (const stepIdx of [7, 17]) {
+          io.hooks(
+            `post-tool\t${JSON.stringify({ stepIdx, toolCall: { name: "run_command", args: { CommandLine: agyCommand } }, toolOutput: "Command sent to the background" })}`,
+          );
+        }
+        io.transcript(
+          agyCompletionStep(9, "session/task-8"),
+          agyCompletionStep(10, "task-8"),
+          agyRunningStep(8, "session/task-8"),
+          agyText(20, "Second command is still running."),
+        );
+        io.hooks('stop\t{"stepIdx":20}');
+        yield* io.waitUntil(() => io.counts.assistantMessages === 1);
+        expect(io.taskEvents.filter((event) => event.type === "task.completed")).toEqual([
+          { type: "task.completed", taskId: "session/task-8" },
+        ]);
+        yield* Effect.sleep("150 millis");
+        expect(io.counts.teardowns).toBe(0);
+        io.transcript(
+          agyCompletionStep(21, "session/task-18"),
+          agyRunningStep(18, "session/task-18"),
+          agyText(22, "All done."),
+        );
+        io.hooks('stop\t{"stepIdx":22}');
+        yield* io.waitUntil(() => io.counts.teardowns === 1);
+      }),
+    ));
+
+  it.each(["completed", "killed"])(
+    "does not reopen a %s hook task when its first transcript start arrives late",
+    (terminalState) =>
+      runAgyBackgroundScenario(`late-transcript-${terminalState}`, (io) =>
+        Effect.gen(function* () {
+          io.hooks(
+            `post-tool\t${JSON.stringify({ stepIdx: 7, toolCall: { name: "run_command", args: { CommandLine: agyCommand } }, toolOutput: terminalState === "completed" ? "Task id 'task-8' is running in the background" : "Command sent to the background" })}`,
+          );
+          if (terminalState === "completed") {
+            io.transcript(agyCompletionStep(9, "session/task-8"));
+          } else {
+            io.hooks(
+              'post-tool\t{"stepIdx":9,"toolCall":{"name":"manage_task","args":{"Action":"kill","TaskId":"task-8"}},"toolOutput":"killed"}',
+            );
+          }
+          io.transcript(agyText(10, "The command is no longer running."));
+          yield* io.waitUntil(() => io.counts.assistantMessages === 1);
+          const settledEvents = [...io.taskEvents];
+          io.transcript(agyRunningStep(8, "session/task-8"), agyText(11, "Done."));
+          io.hooks('stop\t{"stepIdx":11}');
+          yield* io.waitUntil(() => io.counts.teardowns === 1);
+          expect(io.taskEvents).toEqual(settledEvents);
+        }),
+      ),
+  );
+
+  it.each([8, 18])(
+    "does not lose another anonymous command when task-%s is killed before its transcript start",
+    (killedStep) =>
+      runAgyBackgroundScenario(`killed-anonymous-pair-${killedStep}`, (io) =>
+        Effect.gen(function* () {
+          for (const stepIdx of [7, 17]) {
+            io.hooks(
+              `post-tool\t${JSON.stringify({ stepIdx, toolCall: { name: "run_command", args: { CommandLine: agyCommand } }, toolOutput: "Command sent to the background" })}`,
+            );
+          }
+          io.hooks(
+            `post-tool\t${JSON.stringify({ stepIdx: 19, toolCall: { name: "manage_task", args: { Action: "kill", TaskId: `task-${killedStep}` } }, toolOutput: "killed" })}`,
+          );
+          io.transcript(
+            agyRunningStep(killedStep, `session/task-${killedStep}`),
+            agyText(20, "The other command is still running."),
+          );
+          io.hooks('stop\t{"stepIdx":20}');
+          yield* io.waitUntil(() => io.counts.assistantMessages === 1);
+          yield* Effect.sleep("150 millis");
+          expect(io.counts.teardowns).toBe(0);
+          expect(io.taskEvents).toEqual([]);
+          const remainingStep = killedStep === 8 ? 18 : 8;
+          io.transcript(
+            agyRunningStep(remainingStep, `session/task-${remainingStep}`),
+            agyCompletionStep(21, `session/task-${remainingStep}`),
+            agyText(22, "Done."),
+          );
+          io.hooks('stop\t{"stepIdx":22}');
+          yield* io.waitUntil(() => io.counts.teardowns === 1);
+          expect(io.taskEvents).toEqual([
+            { type: "task.started", taskId: `session/task-${remainingStep}` },
+            { type: "task.completed", taskId: `session/task-${remainingStep}` },
+          ]);
+        }),
+      ),
+  );
+
+  it("retains early anonymous completions beyond the unmatched-message history limit", () =>
+    runAgyBackgroundScenario("early-completion-many", (io) =>
+      Effect.gen(function* () {
+        const taskCount = 33;
+        for (let index = 0; index < taskCount; index += 1) {
+          io.hooks(
+            `post-tool\t${JSON.stringify({ stepIdx: index * 3, toolCall: { name: "run_command", args: { CommandLine: agyCommand } }, toolOutput: "Command sent to the background" })}`,
+          );
+        }
+        for (let index = 0; index < taskCount; index += 1) {
+          io.transcript(agyCompletionStep(index * 3 + 2, `session/task-${index}`));
+        }
+        for (let index = 0; index < taskCount; index += 1) {
+          io.transcript(agyRunningStep(index * 3 + 1, `session/task-${index}`));
+        }
+        io.transcript(agyText(100, "All commands completed."));
+        io.hooks('stop\t{"stepIdx":100}');
+        yield* io.waitUntil(() => io.counts.assistantMessages === 1);
+        expect(io.taskEvents.filter((event) => event.type === "task.started")).toHaveLength(
+          taskCount,
+        );
+        expect(io.taskEvents.filter((event) => event.type === "task.completed")).toHaveLength(
+          taskCount,
+        );
+        yield* io.waitUntil(() => io.counts.teardowns === 1);
+      }),
+    ));
+
+  it("ignores the old stop hook after a transcript read outlives its turn", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "synara-audit1170-stale-stop-"));
+    const transcriptFile = path.join(root, "transcript.jsonl");
+    await fs.writeFile(transcriptFile, "");
+    const children: ChildProcess[] = [];
+    const teardowns: number[] = [];
+    let eventFile: string | undefined;
+    let blocked = false;
+    let started!: () => void;
+    let release!: () => void;
+    const readStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const readRelease = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const spawnProcess = ((
+      _command: string,
+      _args: readonly string[],
+      options: { readonly env?: NodeJS.ProcessEnv },
+    ) => {
+      eventFile = options.env?.SYNARA_ANTIGRAVITY_EVENTS;
+      const child = new EventEmitter() as ChildProcess;
+      Object.assign(child, {
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+        killed: false,
+        kill: () => true,
+      });
+      children.push(child);
+      return child;
+    }) as NonNullable<AntigravityAdapterDependencies["spawnProcess"]>;
+    const readCompleteLines: NonNullable<
+      AntigravityAdapterDependencies["readCompleteLines"]
+    > = async (file, offset) => {
+      const batch = await readCompleteAntigravityLines(file, offset);
+      if (file === transcriptFile && !blocked) {
+        blocked = true;
+        started();
+        await readRelease;
+      }
+      return batch;
+    };
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const adapter = yield* AntigravityAdapter;
+          const events = yield* adapter.streamEvents.pipe(Stream.runDrain, Effect.forkChild);
+          const threadId = ThreadId.makeUnsafe("audit-stale-stop");
+          yield* adapter.startSession({
+            provider: "antigravity",
+            threadId,
+            runtimeMode: "full-access",
+            cwd: root,
+            providerOptions: { antigravity: { binaryPath: "/fake/agy" } },
+          });
+          yield* adapter.sendTurn({ threadId, input: "first", attachments: [] });
+          fsSync.appendFileSync(
+            eventFile!,
+            `pre-invocation\t${JSON.stringify({ transcriptPath: transcriptFile })}\nstop\t{"stepIdx":10}\n`,
+          );
+          yield* Effect.promise(() => readStarted).pipe(Effect.timeout("2 seconds"));
+          yield* adapter.interruptTurn(threadId);
+          expect(teardowns).toEqual([0]);
+          yield* adapter.sendTurn({ threadId, input: "second", attachments: [] });
+          release();
+          yield* Effect.sleep("200 millis");
+          expect(teardowns).toEqual([0]);
+          yield* adapter.stopSession(threadId);
+          yield* Fiber.interrupt(events);
+        }).pipe(
+          Effect.provide(
+            makeAntigravityAdapterLive({
+              ensurePlugin: async () => undefined,
+              spawnProcess,
+              readCompleteLines,
+              teardownProcessTree: async (child) => {
+                teardowns.push(children.findIndex((candidate) => candidate === child));
+                return completeProcessTeardown();
+              },
+            }).pipe(
+              Layer.provideMerge(ServerConfig.layerTest(root, { prefix: "audit-stale-stop-" })),
+              Layer.provideMerge(NodeServices.layer),
+            ),
+          ),
+        ),
+      );
+    } finally {
+      release();
+      for (const child of children) child.emit("close", 0, null);
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
 
   it("performs a fresh final hook drain when the process closes during a poll", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "synara-antigravity-final-drain-"));
