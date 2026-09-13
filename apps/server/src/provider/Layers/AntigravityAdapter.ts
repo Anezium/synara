@@ -155,10 +155,10 @@ type AntigravitySessionContext = ToolSurfaceCounters & {
   pendingBackgroundTaskCompletions: AntigravitySystemMessageInfo[];
   /** Recently settled or killed task ids, so a late post-tool hook cannot re-register them. */
   settledBackgroundTaskIds: string[];
-  /** Tool step indexes the transcript backgrounded before their pre-tool hook was seen. */
-  transcriptBackgroundedSteps: Set<number>;
-  /** Tool step indexes whose post-tool hook registered an anonymous background task. */
-  anonymousBackgroundSteps: Set<number>;
+  /** Calls the transcript backgrounded before their pre-tool hook was seen. */
+  transcriptBackgroundedCalls: AntigravityBackgroundCallKey[];
+  /** Calls whose post-tool hook registered an anonymous background task. */
+  anonymousBackgroundCalls: AntigravityBackgroundCallKey[];
   backgroundCompletionSequence: number;
   latestBackgroundCompletionStepIndex?: number;
   /**
@@ -880,6 +880,32 @@ export function parseAntigravityBackgroundTaskStep(
   return { taskId, ...(description ? { description } : {}) };
 }
 
+/**
+ * Identifies one tool call across the transcript and the hook file: the
+ * planner step it belongs to, plus its command line when several calls share
+ * that step. A key without a command line matches any call at the step.
+ */
+export type AntigravityBackgroundCallKey = {
+  readonly stepIndex: number;
+  readonly command?: string;
+};
+
+export function takeAntigravityBackgroundCallKey(
+  keys: AntigravityBackgroundCallKey[],
+  stepIndex: number | undefined,
+  command: string | undefined,
+): boolean {
+  if (stepIndex === undefined) return false;
+  const index = keys.findIndex(
+    (key) =>
+      key.stepIndex === stepIndex &&
+      (key.command === undefined || command === undefined || key.command === command),
+  );
+  if (index < 0) return false;
+  keys.splice(index, 1);
+  return true;
+}
+
 /** agy quotes CommandLine in hook args and transcript tool calls; task descriptions are bare. */
 export function normalizeAntigravityCommandLine(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
@@ -1162,7 +1188,7 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
       }
       context.pendingBackgroundTasks.clear();
       context.pendingAnonymousBackgroundTasks = 0;
-      context.anonymousBackgroundSteps.clear();
+      context.anonymousBackgroundCalls.length = 0;
       context.pendingBackgroundTaskCompletions.length = 0;
     };
 
@@ -1186,7 +1212,7 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
       }
       context.pendingBackgroundTasks.clear();
       context.pendingAnonymousBackgroundTasks = 0;
-      context.anonymousBackgroundSteps.clear();
+      context.anonymousBackgroundCalls.length = 0;
       context.pendingBackgroundTaskCompletions.length = 0;
     };
 
@@ -1518,8 +1544,11 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
         if (pending) {
           pending.backgroundedByTranscript = true;
         } else if (
-          stepIndex !== undefined &&
-          context.anonymousBackgroundSteps.delete(stepIndex - 1)
+          takeAntigravityBackgroundCallKey(
+            context.anonymousBackgroundCalls,
+            toolStep,
+            wantedCommand,
+          )
         ) {
           // The call already completed in an earlier hook batch and was counted
           // as an anonymous task; the named registration below supersedes it.
@@ -1527,8 +1556,11 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
             0,
             context.pendingAnonymousBackgroundTasks - 1,
           );
-        } else if (stepIndex !== undefined) {
-          context.transcriptBackgroundedSteps.add(stepIndex - 1);
+        } else if (toolStep !== undefined) {
+          context.transcriptBackgroundedCalls.push({
+            stepIndex: toolStep,
+            ...(wantedCommand !== undefined ? { command: wantedCommand } : {}),
+          });
         }
         const command = pending?.args?.CommandLine;
         const description =
@@ -1902,7 +1934,13 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
               ...(toolArgs ? { args: toolArgs } : {}),
             };
             // The transcript may report the background start before this hook is read.
-            if (stepIndex !== undefined && context.transcriptBackgroundedSteps.delete(stepIndex)) {
+            if (
+              takeAntigravityBackgroundCallKey(
+                context.transcriptBackgroundedCalls,
+                stepIndex,
+                normalizeAntigravityCommandLine(toolArgs?.CommandLine),
+              )
+            ) {
               pending.backgroundedByTranscript = true;
             }
             context.pendingTools.push(pending);
@@ -1985,8 +2023,11 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
           const transcriptOwned =
             pending?.backgroundedByTranscript === true ||
             (pending === undefined &&
-              stepIndex !== undefined &&
-              context.transcriptBackgroundedSteps.delete(stepIndex));
+              takeAntigravityBackgroundCallKey(
+                context.transcriptBackgroundedCalls,
+                stepIndex,
+                hookCommand,
+              ));
           if (!failed && toolName && !transcriptOwned) {
             const bgStart = detectAntigravityBackgroundTaskStart(toolName, toolArgs, payload);
             if (bgStart?.isBackground) {
@@ -2006,7 +2047,11 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
                   ...(toolArgs ? { args: toolArgs } : {}),
                 });
                 if (bgStart.taskId === undefined && stepIndex !== undefined) {
-                  context.anonymousBackgroundSteps.add(stepIndex);
+                  const command = normalizeAntigravityCommandLine(toolArgs?.CommandLine);
+                  context.anonymousBackgroundCalls.push({
+                    stepIndex,
+                    ...(command !== undefined ? { command } : {}),
+                  });
                 }
               }
             } else if (toolName === "manage_task") {
@@ -2156,8 +2201,8 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
           pendingAnonymousBackgroundTasks: 0,
           pendingBackgroundTaskCompletions: [],
           settledBackgroundTaskIds: [],
-          transcriptBackgroundedSteps: new Set(),
-          anonymousBackgroundSteps: new Set(),
+          transcriptBackgroundedCalls: [],
+          anonymousBackgroundCalls: [],
           backgroundCompletionSequence: 0,
           foreignConversations: new Map(),
           surfacedToolCallCounts: new Map(),
@@ -2281,8 +2326,8 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
         context.processedSteps.clear();
         yield* Effect.promise(() => markExistingTranscriptStepsProcessed(context));
         context.pendingTools = [];
-        context.transcriptBackgroundedSteps.clear();
-        context.anonymousBackgroundSteps.clear();
+        context.transcriptBackgroundedCalls.length = 0;
+        context.anonymousBackgroundCalls.length = 0;
         context.pendingAnonymousBackgroundTasks = 0;
         context.pendingBackgroundTaskCompletions.length = 0;
         context.backgroundCompletionSequence = 0;

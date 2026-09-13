@@ -32,6 +32,7 @@ import {
   matchAntigravityTrackedTaskId,
   normalizeAntigravityCommandLine,
   parseAntigravityBackgroundTaskStep,
+  takeAntigravityBackgroundCallKey,
   parseAntigravityCliModelLabel,
   parseAntigravityModelLines,
   parseAntigravitySystemMessage,
@@ -2185,6 +2186,12 @@ describe("Antigravity background task helpers (#752)", () => {
     expect(normalizeAntigravityCommandLine(`"${agyCommand}"`)).toBe(agyCommand);
     expect(normalizeAntigravityCommandLine("  npm   run build ")).toBe("npm run build");
     expect(normalizeAntigravityCommandLine(undefined)).toBeUndefined();
+    const keys = [{ stepIndex: 5, command: "npm test" }, { stepIndex: 5 }];
+    expect(takeAntigravityBackgroundCallKey(keys, 5, "npm run build")).toBe(true);
+    expect(keys).toEqual([{ stepIndex: 5, command: "npm test" }]);
+    expect(takeAntigravityBackgroundCallKey(keys, 5, "npm run build")).toBe(false);
+    expect(takeAntigravityBackgroundCallKey(keys, 5, undefined)).toBe(true);
+    expect(takeAntigravityBackgroundCallKey(keys, undefined, "npm test")).toBe(false);
   });
 
   const runAgyBackgroundScenario = async (
@@ -2451,6 +2458,45 @@ describe("Antigravity background task helpers (#752)", () => {
         io.transcript(agyCompletionStep(999), agyText(1000, "Overlay dumped."));
         yield* io.waitUntil(() => io.counts.assistantMessages === 2);
         io.hooks('stop	{"stepIdx":1000}');
+        yield* io.waitUntil(() => io.counts.teardowns === 1);
+      }),
+    ));
+
+  it("keeps the transcript marker for the backgrounded call when hooks arrive late", () =>
+    runAgyBackgroundScenario("agy-background-late-hooks-two-calls", (io) =>
+      Effect.gen(function* () {
+        const quickArgs = { CommandLine: '"adb devices"', WaitMsBeforeAsync: "5000" };
+        const slowArgs = { CommandLine: `"${agyCommand}"`, WaitMsBeforeAsync: "5000" };
+        // The transcript surfaces both calls before any hook is read, so the
+        // late pre-tool hooks open no pending lifecycle.
+        io.transcript(
+          {
+            step_index: 996,
+            type: "PLANNER_RESPONSE",
+            tool_calls: [
+              { name: "run_command", args: quickArgs },
+              { name: "run_command", args: slowArgs },
+            ],
+          },
+          agyRunningStep(997),
+          agyText(998, "Dumping native overlay hierarchy."),
+        );
+        yield* io.waitUntil(() => io.counts.assistantMessages === 1);
+        const quick = JSON.stringify(quickArgs);
+        const slow = JSON.stringify(slowArgs);
+        io.hooks(
+          `pre-tool\t{"stepIdx":996,"toolCall":{"name":"run_command","args":${quick}}}`,
+          `pre-tool\t{"stepIdx":996,"toolCall":{"name":"run_command","args":${slow}}}`,
+          `post-tool\t{"stepIdx":996,"toolCall":{"name":"run_command","args":${quick}},"toolOutput":"The command exited with code 0."}`,
+          `post-tool\t{"stepIdx":996,"toolCall":{"name":"run_command","args":${slow}},"toolOutput":"Command sent to the background"}`,
+          'stop\t{"stepIdx":998}',
+        );
+        yield* Effect.sleep("200 millis");
+        expect(io.counts.teardowns).toBe(0);
+
+        io.transcript(agyCompletionStep(999), agyText(1000, "Overlay dumped."));
+        yield* io.waitUntil(() => io.counts.assistantMessages === 2);
+        io.hooks('stop\t{"stepIdx":1000}');
         yield* io.waitUntil(() => io.counts.teardowns === 1);
       }),
     ));
