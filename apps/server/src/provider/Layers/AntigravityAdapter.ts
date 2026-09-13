@@ -1926,8 +1926,15 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
             } satisfies ProviderRuntimeEvent);
           }
 
-          // A transcript-registered task's post-tool hook reports its end, not a new start.
-          if (!failed && toolName && !pending?.backgroundedByTranscript) {
+          // A transcript-registered task's post-tool hook reports its end, not a new
+          // start. Without a pending entry (lost pre-tool hook) the step marker
+          // left by the transcript identifies the call instead.
+          const transcriptOwned =
+            pending?.backgroundedByTranscript === true ||
+            (pending === undefined &&
+              stepIndex !== undefined &&
+              context.transcriptBackgroundedSteps.delete(stepIndex));
+          if (!failed && toolName && !transcriptOwned) {
             const bgStart = detectAntigravityBackgroundTaskStart(toolName, toolArgs, payload);
             if (bgStart?.isBackground) {
               // Without a pre-tool entry the marker above cannot help: a hook that
