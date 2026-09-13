@@ -880,6 +880,13 @@ export function parseAntigravityBackgroundTaskStep(
   return { taskId, ...(description ? { description } : {}) };
 }
 
+/** agy quotes CommandLine in hook args and transcript tool calls; task descriptions are bare. */
+export function normalizeAntigravityCommandLine(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim().replace(/^"(.*)"$/su, "$1");
+  return trimmed.replace(/\s+/gu, " ").trim() || undefined;
+}
+
 export function matchAntigravityTrackedTaskId(
   candidateId: string | undefined,
   trackedTaskIds: Iterable<string>,
@@ -1496,10 +1503,18 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
           ? parseAntigravityBackgroundTaskStep(step.content)
           : null;
       if (backgroundStart) {
+        // The background step always directly follows its tool call's planner
+        // step. When that step issued several calls, the task description names
+        // the command that was backgrounded.
+        const toolStep = stepIndex === undefined ? undefined : stepIndex - 1;
+        const candidates = context.pendingTools.filter((tool) => tool.stepIndex === toolStep);
+        const wantedCommand = normalizeAntigravityCommandLine(backgroundStart.description);
         const pending =
-          context.pendingTools.find(
-            (tool) => stepIndex !== undefined && tool.stepIndex === stepIndex - 1,
-          ) ?? context.pendingTools.findLast((tool) => tool.name === "run_command");
+          candidates.find(
+            (tool) =>
+              wantedCommand !== undefined &&
+              normalizeAntigravityCommandLine(tool.args?.CommandLine) === wantedCommand,
+          ) ?? (candidates.length === 1 ? candidates[0] : undefined);
         if (pending) {
           pending.backgroundedByTranscript = true;
         } else if (
@@ -1518,7 +1533,14 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
         const command = pending?.args?.CommandLine;
         const description =
           backgroundStart.description ?? (typeof command === "string" ? command : undefined);
-        const name = pending?.name ?? "run_command";
+        const plannerStep = currentTurn(context)?.items.find(
+          (item): item is TranscriptStep =>
+            typeof item === "object" &&
+            item !== null &&
+            (item as TranscriptStep).step_index === toolStep,
+        );
+        const plannerCall = plannerStep?.tool_calls?.find((call) => typeof call?.name === "string");
+        const name = pending?.name ?? plannerCall?.name ?? "run_command";
         registerBackgroundTask(
           context,
           { taskId: backgroundStart.taskId, ...(description ? { description } : {}) },

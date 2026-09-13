@@ -30,6 +30,7 @@ import {
   makeAntigravityRuntimeEventBase,
   makeAntigravityAdapterLive,
   matchAntigravityTrackedTaskId,
+  normalizeAntigravityCommandLine,
   parseAntigravityBackgroundTaskStep,
   parseAntigravityCliModelLabel,
   parseAntigravityModelLines,
@@ -2181,6 +2182,9 @@ describe("Antigravity background task helpers (#752)", () => {
     ).toEqual({ taskId: "task-5" });
     expect(parseAntigravityBackgroundTaskStep("Created file E:\\tmp\\task-1.txt")).toBeNull();
     expect(parseAntigravityBackgroundTaskStep(undefined)).toBeNull();
+    expect(normalizeAntigravityCommandLine(`"${agyCommand}"`)).toBe(agyCommand);
+    expect(normalizeAntigravityCommandLine("  npm   run build ")).toBe("npm run build");
+    expect(normalizeAntigravityCommandLine(undefined)).toBeUndefined();
   });
 
   const runAgyBackgroundScenario = async (
@@ -2418,6 +2422,32 @@ describe("Antigravity background task helpers (#752)", () => {
           agyCompletionStep(999),
           agyText(1000, "Overlay dumped."),
         );
+        yield* io.waitUntil(() => io.counts.assistantMessages === 2);
+        io.hooks('stop	{"stepIdx":1000}');
+        yield* io.waitUntil(() => io.counts.teardowns === 1);
+      }),
+    ));
+
+  it("marks the pending call named by the task description when a step issued several", () =>
+    runAgyBackgroundScenario("agy-background-two-calls-one-step", (io) =>
+      Effect.gen(function* () {
+        const quick = JSON.stringify({ CommandLine: '"adb devices"', WaitMsBeforeAsync: "5000" });
+        const slow = JSON.stringify({ CommandLine: `"${agyCommand}"`, WaitMsBeforeAsync: "5000" });
+        io.hooks(
+          `pre-tool	{"stepIdx":996,"toolCall":{"name":"run_command","args":${quick}}}`,
+          `pre-tool	{"stepIdx":996,"toolCall":{"name":"run_command","args":${slow}}}`,
+        );
+        io.transcript(agyRunningStep(997), agyText(998, "Dumping native overlay hierarchy."));
+        yield* io.waitUntil(() => io.counts.assistantMessages === 1);
+        io.hooks(
+          `post-tool	{"stepIdx":996,"toolCall":{"name":"run_command","args":${quick}},"toolOutput":"The command exited with code 0."}`,
+          `post-tool	{"stepIdx":996,"toolCall":{"name":"run_command","args":${slow}},"toolOutput":"Command sent to the background"}`,
+          'stop	{"stepIdx":998}',
+        );
+        yield* Effect.sleep("200 millis");
+        expect(io.counts.teardowns).toBe(0);
+
+        io.transcript(agyCompletionStep(999), agyText(1000, "Overlay dumped."));
         yield* io.waitUntil(() => io.counts.assistantMessages === 2);
         io.hooks('stop	{"stepIdx":1000}');
         yield* io.waitUntil(() => io.counts.teardowns === 1);
