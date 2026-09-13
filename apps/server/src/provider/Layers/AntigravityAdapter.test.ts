@@ -2337,6 +2337,26 @@ describe("Antigravity background task helpers (#752)", () => {
       }),
     ));
 
+  it("ignores a late post-tool start for a transcript task killed through manage_task", () =>
+    runAgyBackgroundScenario("agy-background-killed-late-post-tool", (io) =>
+      Effect.gen(function* () {
+        io.transcript(agyRunningStep(997), agyText(998, "Dumping native overlay hierarchy."));
+        io.hooks('stop	{"stepIdx":998}');
+        yield* io.waitUntil(() => io.counts.assistantMessages === 1);
+        yield* Effect.sleep("200 millis");
+        expect(io.counts.teardowns).toBe(0);
+
+        const args = JSON.stringify({ CommandLine: agyCommand, WaitMsBeforeAsync: "5000" });
+        io.hooks(
+          `post-tool	{"stepIdx":1001,"toolCall":{"name":"manage_task","args":{"Action":"kill","TaskId":"task-997"}},"toolOutput":"killed"}`,
+          `post-tool	{"stepIdx":996,"toolCall":{"name":"run_command","args":${args}},"toolOutput":${JSON.stringify(agyRunningStep(997).content)}}`,
+        );
+        io.transcript(agyText(1002, "Stopped the dump."));
+        io.hooks('stop	{"stepIdx":1002}');
+        yield* io.waitUntil(() => io.counts.teardowns === 1);
+      }),
+    ));
+
   it("tracks a transcript background task once when post-tool reports it too", () =>
     runAgyBackgroundScenario("agy-background-dedupe", (io) =>
       Effect.gen(function* () {

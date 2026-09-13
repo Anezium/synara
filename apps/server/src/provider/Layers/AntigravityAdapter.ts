@@ -1164,6 +1164,14 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
       message: AntigravitySystemMessageInfo,
     ): string | undefined => message.taskId ?? message.sender;
 
+    const rememberSettledBackgroundTask = (
+      context: AntigravitySessionContext,
+      taskId: string,
+    ): void => {
+      context.settledBackgroundTaskIds.push(taskId);
+      if (context.settledBackgroundTaskIds.length > 32) context.settledBackgroundTaskIds.shift();
+    };
+
     const settleTrackedBackgroundTask = (
       context: AntigravitySessionContext,
       taskId: string,
@@ -1172,8 +1180,7 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
       const tracked = context.pendingBackgroundTasks.get(taskId);
       if (!tracked) return false;
       context.pendingBackgroundTasks.delete(taskId);
-      context.settledBackgroundTaskIds.push(taskId);
-      if (context.settledBackgroundTaskIds.length > 32) context.settledBackgroundTaskIds.shift();
+      rememberSettledBackgroundTask(context, taskId);
       offer({
         ...base(context),
         type: "task.completed",
@@ -1928,6 +1935,7 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
                   : undefined;
               if (matchedId) {
                 context.pendingBackgroundTasks.delete(matchedId);
+                rememberSettledBackgroundTask(context, matchedId);
                 offer({
                   ...base(context),
                   type: "task.updated",
