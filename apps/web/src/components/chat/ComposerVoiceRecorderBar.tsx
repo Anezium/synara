@@ -34,8 +34,8 @@ export function ComposerVoiceRecorderBar(props: ComposerVoiceRecorderBarProps) {
     if (!node) {
       return;
     }
-    const measureTrack = () => {
-      const width = node.clientWidth;
+    const measureTrack = (entries?: ResizeObserverEntry[]) => {
+      const width = entries?.[0]?.contentRect.width ?? node.clientWidth;
       if (width <= 0) {
         return;
       }
@@ -49,7 +49,8 @@ export function ComposerVoiceRecorderBar(props: ComposerVoiceRecorderBarProps) {
 
   const visibleBarCount = Math.min(
     MAX_WAVEFORM_SAMPLES,
-    Math.max(8, Math.floor(trackWidth / (BAR_WIDTH_PX + BAR_GAP_PX))),
+    // There is no gap after the final bar.
+    Math.max(8, Math.floor((trackWidth + BAR_GAP_PX) / (BAR_WIDTH_PX + BAR_GAP_PX))),
   );
   const visibleLevels = props.waveformLevels.slice(-visibleBarCount);
   // The recorder retains a bounded history. Spread that capacity across wide

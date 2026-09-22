@@ -42,6 +42,24 @@ describe("ComposerVoiceRecorderBar", () => {
     await screen.unmount();
   });
 
+  it("fills fractional-width tracks without reserving a trailing gap or clipping bars", async () => {
+    const screen = await renderWaveform(500);
+    const { track } = getWaveformElements();
+    track.style.flex = "none";
+
+    for (const width of [318.25, 318.75, 319.25, 319.75, 320.25, 320.75, 321.25, 321.75]) {
+      track.style.width = `${width}px`;
+      await expect
+        .poll(() => ({
+          fillsTrack: waveformLeftInset(track) < 4,
+          keepsNewestBarVisible: waveformRightInset(track) < 0.1,
+        }))
+        .toEqual({ fillsTrack: true, keepsNewestBarVisible: true });
+    }
+
+    await screen.unmount();
+  });
+
   it("grows short recordings from the right without filling missing history", async () => {
     const screen = await renderWaveform(1600, [0.2, 0.6, 0.4]);
     const { track } = getWaveformElements();
