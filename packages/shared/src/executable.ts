@@ -248,6 +248,16 @@ function listDirectoryNames(directory: string): ReadonlySet<string> | null {
 }
 
 /**
+ * Whether a directory listing can rule `name` out. The listing is folded with
+ * `toLowerCase`, which matches filesystem case-insensitivity only for plain ASCII;
+ * non-ASCII names (Unicode folding/normalization) and `~` (Windows 8.3 short names,
+ * which readdir never lists) always go to stat.
+ */
+function isListingFilterable(name: string): boolean {
+  return /^[\x20-\x7d]*$/.test(name);
+}
+
+/**
  * Resolves many commands against one PATH snapshot with the same result as
  * `resolveExecutable`. Each PATH directory is listed once and only candidates
  * present in the listing are stat-ed. Probing every command × PATHEXT name costs
@@ -285,7 +295,9 @@ export function createBatchExecutableResolver(
     for (const directory of pathEntries(context.env, context.platform)) {
       const listing = listingFor(directory);
       for (const name of names) {
-        if (listing !== null && !listing.has(name.toLowerCase())) continue;
+        if (listing !== null && isListingFilterable(name) && !listing.has(name.toLowerCase())) {
+          continue;
+        }
         const candidatePath = join(directory, name);
         if (isExecutableFileIn(candidatePath, context)) {
           return candidatePath;

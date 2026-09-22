@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -41,6 +41,34 @@ describe("createBatchExecutableResolver", () => {
     expect(resolve("other")?.toLowerCase()).toBe(join(second, "other.cmd").toLowerCase());
     expect(resolve("bare")).toBeNull();
     expect(resolve("folder")).toBeNull();
+  });
+
+  const posixOnly = it.skipIf(process.platform === "win32" || process.getuid?.() === 0);
+
+  posixOnly("honors the executable bit on POSIX", () => {
+    const dir = makeTempDir();
+    writeFileSync(join(dir, "runnable"), "", { mode: 0o755 });
+    writeFileSync(join(dir, "plain"), "", { mode: 0o644 });
+    const options = { platform: "linux" as const, env: { PATH: dir } };
+    const resolve = createBatchExecutableResolver(options);
+
+    expect(resolve("runnable")).toBe(join(dir, "runnable"));
+    expect(resolve("plain")).toBeNull();
+    expect(resolve("plain")).toBe(resolveExecutable("plain", options));
+  });
+
+  posixOnly("falls back to stat for PATH directories that cannot be listed", () => {
+    const dir = makeTempDir();
+    writeFileSync(join(dir, "hidden-tool"), "", { mode: 0o755 });
+    chmodSync(dir, 0o111);
+    try {
+      const options = { platform: "linux" as const, env: { PATH: dir } };
+
+      expect(createBatchExecutableResolver(options)("hidden-tool")).toBe(join(dir, "hidden-tool"));
+      expect(resolveExecutable("hidden-tool", options)).toBe(join(dir, "hidden-tool"));
+    } finally {
+      chmodSync(dir, 0o755);
+    }
   });
 
   it("delegates qualified commands to resolveExecutable", () => {
