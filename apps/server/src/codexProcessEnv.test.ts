@@ -297,6 +297,38 @@ describe("buildCodexProcessEnv", () => {
     }
   });
 
+  it("drops an inherited managed block when a probe appends no section", async () => {
+    const sourceHome = mkdtempSync(path.join(os.tmpdir(), "synara-codex-parent-probe-"));
+    const runtimeHome = mkdtempSync(path.join(os.tmpdir(), "synara-codex-child-probe-"));
+    const sourceConfig = [
+      'model = "gpt-5.6-sol"',
+      "",
+      "# >>> synara managed config >>>",
+      "[mcp_servers.synara]",
+      'url = "http://127.0.0.1:61240/mcp"',
+      'bearer_token_env_var = "SYNARA_AGENT_GATEWAY_TOKEN"',
+      "# <<< synara managed config <<<",
+    ].join("\n");
+    writeFileSync(path.join(sourceHome, "config.toml"), sourceConfig, "utf8");
+
+    try {
+      const env = await buildCodexProcessEnv({
+        env: { SYNARA_HOME: runtimeHome, CODEX_HOME: sourceHome },
+        platform: "darwin",
+      });
+      const overlayHome = env.CODEX_HOME;
+      if (!overlayHome) throw new Error("Expected a child Synara Codex home overlay.");
+      const overlayConfig = readFileSync(path.join(overlayHome, "config.toml"), "utf8");
+
+      expect(overlayConfig).toContain('model = "gpt-5.6-sol"');
+      expect(overlayConfig).not.toContain("http://127.0.0.1:61240/mcp");
+      expect(overlayConfig).not.toContain("# >>> synara managed config >>>");
+    } finally {
+      rmSync(sourceHome, { recursive: true, force: true });
+      rmSync(runtimeHome, { recursive: true, force: true });
+    }
+  });
+
   it("ignores managed marker text embedded in TOML string values", async () => {
     const sourceHome = mkdtempSync(path.join(os.tmpdir(), "synara-codex-marker-text-"));
     const runtimeHome = mkdtempSync(path.join(os.tmpdir(), "synara-codex-marker-runtime-"));

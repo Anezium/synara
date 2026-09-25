@@ -352,18 +352,6 @@ function appendConfigBlock(config: string, block: string): string {
   return base.length > 0 ? `${base}\n\n${block}\n` : `${block}\n`;
 }
 
-export function appendCodexConfigSection(config: string, section: string): string {
-  const trimmedSection = section.trim();
-  if (!trimmedSection) {
-    return config;
-  }
-  const firstLine = trimmedSection.split("\n")[0] ?? trimmedSection;
-  if (findExactConfigLine(splitConfigLines(config), firstLine) !== -1) {
-    return config;
-  }
-  return appendConfigBlock(config, trimmedSection);
-}
-
 export const SYNARA_MANAGED_CODEX_CONFIG_BEGIN = "# >>> synara managed config >>>";
 export const SYNARA_MANAGED_CODEX_CONFIG_END = "# <<< synara managed config <<<";
 
@@ -685,13 +673,7 @@ export function mergeShellEnvPolicyExclude(config: string, envVarName: string): 
 }
 
 function appendManagedCodexConfigSection(config: string, section: string): string {
-  // A development/Canary Synara can be launched from a terminal managed by
-  // another Synara instance. In that case CODEX_HOME points at the parent
-  // instance's overlay, whose managed block contains the parent's MCP port.
-  // Drop that complete block before rebuilding this instance's overlay;
-  // otherwise appendCodexConfigSection sees the old marker and keeps the
-  // stale endpoint instead of appending the replacement.
-  let overlayConfig = removeManagedCodexConfigSections(config);
+  let overlayConfig = config;
   const managedMcpTableName = normalizeTomlTableHeaderName(SYNARA_MANAGED_MCP_TABLE_HEADER);
   const managedMcpDescendantPrefix = `${managedMcpTableName!.slice(0, -1)},`;
   const tables: string[] = [];
@@ -828,7 +810,15 @@ async function prepareSynaraCodexHomeOverlayUnlocked(input: {
     ]),
   ].slice(0, MAX_CONFIG_SUPPRESSION_SECTIONS);
   const overlayConfigPath = path.join(overlayHomePath, "config.toml");
-  let overlayConfig = disableCodexConfigSections(sourceConfig, suppressedSections, true);
+  // A development/Canary Synara can be launched from a terminal managed by
+  // another Synara instance. In that case CODEX_HOME points at the parent
+  // instance's overlay, whose managed block contains the parent's MCP port.
+  // Drop that complete block on every rebuild, including probes that append
+  // no section of their own, so the parent's endpoint never reaches this
+  // instance's overlay.
+  let overlayConfig = removeManagedCodexConfigSections(
+    disableCodexConfigSections(sourceConfig, suppressedSections, true),
+  );
   const managedSection =
     input.appendConfigToml ??
     (await fs
