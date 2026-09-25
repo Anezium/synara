@@ -386,8 +386,17 @@ it.layer(NodeServices.layer)("ProviderHealth", (it) => {
           "",
         );
         const delimiter = OS.platform() === "win32" ? ";" : ":";
-        vi.stubEnv("PATH", [binDir, process.env.PATH].filter(Boolean).join(delimiter));
-        yield* Effect.addFinalizer(() => Effect.sync(() => vi.unstubAllEnvs()));
+        // Packaged Windows servers inherit the native "Path" casing; reproduce it here.
+        const inheritedPath = process.env.PATH;
+        const pathKey = OS.platform() === "win32" ? "Path" : "PATH";
+        delete process.env.PATH;
+        process.env[pathKey] = [binDir, inheritedPath].filter(Boolean).join(delimiter);
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            delete process.env[pathKey];
+            process.env.PATH = inheritedPath;
+          }),
+        );
         const settings = {
           ...allProvidersDisabledServerSettings,
           providers: {
