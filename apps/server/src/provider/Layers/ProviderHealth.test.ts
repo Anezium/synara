@@ -80,6 +80,7 @@ function mockSpawnerLayer(
       | {
           readonly env?: NodeJS.ProcessEnv;
           readonly windowsVerbatimArguments?: boolean;
+          readonly stdin?: "pipe" | "ignore" | "inherit";
         }
       | undefined,
   ) => {
@@ -97,6 +98,7 @@ function mockSpawnerLayer(
         options?: {
           env?: NodeJS.ProcessEnv;
           windowsVerbatimArguments?: boolean;
+          stdin?: "pipe" | "ignore" | "inherit";
         };
       };
       return Effect.succeed(

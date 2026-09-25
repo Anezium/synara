@@ -19,6 +19,7 @@ import type {
 } from "@synara/contracts";
 import { ServerProviderUpdateError } from "@synara/contracts";
 import { parseCodexConfigModelProvider } from "@synara/shared/codexConfig";
+import { envPathKeyFor } from "@synara/shared/executable";
 import { decodeJsonResult } from "@synara/shared/schemaJson";
 import { expandHomePath } from "@synara/shared/synaraHome";
 import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
@@ -153,6 +154,19 @@ const providerCommandEnv = (provider: ProviderKind): NodeJS.ProcessEnv =>
   provider === OPENCODE_PROVIDER
     ? buildOpenCodeServerProcessEnv({})
     : buildProviderChildEnvironment({ provider: providerChildKind(provider) });
+
+// Windows spreads the inherited environment under its native "Path" key. Writing a
+// literal `PATH` next to it leaves both keys in the child environment, and CLIs that
+// read `PATH` (Bun-based ones such as opencode) then see only the prepended entry.
+const prependPathEntry = (env: NodeJS.ProcessEnv, entry: string): NodeJS.ProcessEnv => {
+  const envPathKey = envPathKeyFor(env);
+  return {
+    ...env,
+    [envPathKey]: [entry, env[envPathKey]]
+      .filter((value): value is string => Boolean(value))
+      .join(OS.platform() === "win32" ? ";" : ":"),
+  };
+};
 
 const UPDATE_OUTPUT_MAX_BYTES = 10_000;
 const MAX_REFRESH_REVISION_RETRIES = 1;
@@ -2644,16 +2658,14 @@ export function makeProviderHealthLive(options?: { readonly providerUpdateTimeou
       }) {
         const baseEnv = providerCommandEnv(input.provider);
         const updateEnv = input.pathPrepend
-          ? {
-              ...baseEnv,
-              PATH: [input.pathPrepend, baseEnv.PATH]
-                .filter((entry): entry is string => Boolean(entry))
-                .join(OS.platform() === "win32" ? ";" : ":"),
-            }
+          ? prependPathEntry(baseEnv, input.pathPrepend)
           : baseEnv;
         const child = yield* spawner.spawn(
           makeEffectProcessCommand(input.command, input.args, {
             env: updateEnv,
+            // Update commands are non-interactive. An open stdin pipe lets CLIs such as
+            // `opencode upgrade` block on a confirmation prompt until the update timeout.
+            stdin: "ignore",
           }),
         );
         yield* Effect.addFinalizer(() => child.kill().pipe(Effect.ignore));
