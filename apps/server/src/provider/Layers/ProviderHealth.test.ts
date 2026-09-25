@@ -40,6 +40,7 @@ import {
   parseAuthStatusFromOutput,
   parseClaudeAuthStatusFromOutput,
   PACKAGE_MANAGED_PROVIDER_UPDATES,
+  prependPathEntry,
   providerStatusesEqual,
   ProviderHealthLive,
   projectProviderStatusesForSettings,
@@ -346,6 +347,61 @@ it.layer(NodeServices.layer)("ProviderHealth", (it) => {
         pathPrepend: "/Users/test/.nvm/versions/node/v24.13.0/bin",
       });
     });
+
+    it("prepends update PATH entries under the environment's existing path key", () => {
+      const delimiter = OS.platform() === "win32" ? ";" : ":";
+      const env = prependPathEntry({ Path: "C:\\Windows", HOME: "home" }, "npm-bin");
+
+      assert.deepStrictEqual(env, {
+        Path: ["npm-bin", "C:\\Windows"].join(delimiter),
+        HOME: "home",
+      });
+      assert.deepStrictEqual(prependPathEntry({ HOME: "home" }, "npm-bin"), {
+        HOME: "home",
+        PATH: "npm-bin",
+      });
+    });
+
+    it.effect("runs provider update commands with stdin closed", () =>
+      Effect.gen(function* () {
+        let updateStdin: string | undefined;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "provider-update-stdin-",
+        });
+        const settings = {
+          ...allProvidersDisabledServerSettings,
+          providers: {
+            ...allProvidersDisabledServerSettings.providers,
+            codex: {
+              ...DEFAULT_SERVER_SETTINGS.providers.codex,
+              enabled: true,
+              binaryPath:
+                "/Users/test/.nvm/versions/node/v24.13.0/lib/node_modules/@openai/codex/bin/codex",
+            },
+          },
+        } satisfies typeof DEFAULT_SERVER_SETTINGS;
+        const layer = makeProviderHealthLive().pipe(
+          Layer.provideMerge(ServerSettingsService.layerTest(settings)),
+          Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
+          Layer.provideMerge(
+            mockSpawnerLayer((args, command, _env, options) => {
+              if ([command, ...args].join(" ").includes("@openai/codex@latest")) {
+                updateStdin = options?.stdin;
+              }
+              return { stdout: "", stderr: "", code: 0 };
+            }),
+          ),
+        );
+
+        yield* Effect.gen(function* () {
+          const providerHealth = yield* ProviderHealth;
+          return yield* providerHealth.updateProvider({ provider: "codex" });
+        }).pipe(Effect.provide(layer));
+
+        assert.strictEqual(updateStdin, "ignore");
+      }),
+    );
 
     it.effect("stops a hung provider process and persists a failed update state", () =>
       Effect.gen(function* () {

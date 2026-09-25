@@ -158,7 +158,7 @@ const providerCommandEnv = (provider: ProviderKind): NodeJS.ProcessEnv =>
 // Windows spreads the inherited environment under its native "Path" key. Writing a
 // literal `PATH` next to it leaves both keys in the child environment, and CLIs that
 // read `PATH` (Bun-based ones such as opencode) then see only the prepended entry.
-const prependPathEntry = (env: NodeJS.ProcessEnv, entry: string): NodeJS.ProcessEnv => {
+export const prependPathEntry = (env: NodeJS.ProcessEnv, entry: string): NodeJS.ProcessEnv => {
   const envPathKey = envPathKeyFor(env);
   return {
     ...env,
