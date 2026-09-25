@@ -350,17 +350,17 @@ it.layer(NodeServices.layer)("ProviderHealth", (it) => {
 
     it("prepends update PATH entries under one Windows path key", () => {
       assert.deepStrictEqual(
-        prependPathEntry({ Path: "C:\Windows", HOME: "home" }, "C:\npm", "win32"),
-        { Path: "C:\npm;C:\Windows", HOME: "home" },
+        prependPathEntry({ Path: "C:\\Windows", HOME: "home" }, "C:\\npm", "win32"),
+        { Path: "C:\\npm;C:\\Windows", HOME: "home" },
       );
       // An already duplicated environment collapses to the key Node would keep.
       assert.deepStrictEqual(
-        prependPathEntry({ Path: "C:\Windows", PATH: "C:\short" }, "C:\npm", "win32"),
-        { PATH: "C:\npm;C:\short;C:\Windows" },
+        prependPathEntry({ Path: "C:\\Windows", PATH: "C:\\short" }, "C:\\npm", "win32"),
+        { PATH: "C:\\npm;C:\\short;C:\\Windows" },
       );
-      assert.deepStrictEqual(prependPathEntry({ HOME: "home" }, "C:\npm", "win32"), {
+      assert.deepStrictEqual(prependPathEntry({ HOME: "home" }, "C:\\npm", "win32"), {
         HOME: "home",
-        PATH: "C:\npm",
+        PATH: "C:\\npm",
       });
     });
 
