@@ -20,6 +20,7 @@ import type {
 import { ServerProviderUpdateError } from "@synara/contracts";
 import { parseCodexConfigModelProvider } from "@synara/shared/codexConfig";
 import { envPathKeyFor } from "@synara/shared/executable";
+import { isPathName, mergePathEntries } from "@synara/shared/shell";
 import { decodeJsonResult } from "@synara/shared/schemaJson";
 import { expandHomePath } from "@synara/shared/synaraHome";
 import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
@@ -156,16 +157,29 @@ const providerCommandEnv = (provider: ProviderKind): NodeJS.ProcessEnv =>
     : buildProviderChildEnvironment({ provider: providerChildKind(provider) });
 
 // Windows spreads the inherited environment under its native "Path" key. Writing a
-// literal `PATH` next to it leaves both keys in the child environment, and CLIs that
-// read `PATH` (Bun-based ones such as opencode) then see only the prepended entry.
-export const prependPathEntry = (env: NodeJS.ProcessEnv, entry: string): NodeJS.ProcessEnv => {
-  const envPathKey = envPathKeyFor(env);
-  return {
-    ...env,
-    [envPathKey]: [entry, env[envPathKey]]
-      .filter((value): value is string => Boolean(value))
-      .join(OS.platform() === "win32" ? ";" : ":"),
-  };
+// literal `PATH` next to it makes Node's spawn keep only one casing, `PATH`, so the
+// child sees just the prepended entry and CLIs such as opencode cannot find their
+// package manager. Keep a single path key that carries the prepended entry followed
+// by the inherited value.
+export const prependPathEntry = (
+  env: NodeJS.ProcessEnv,
+  entry: string,
+  platform: NodeJS.Platform = OS.platform(),
+): NodeJS.ProcessEnv => {
+  // Read own keys: `in` on Windows' process.env reports every casing as present.
+  const pathKeys = Object.keys(env).filter((key) =>
+    platform === "win32" ? isPathName(key) : key === "PATH",
+  );
+  const envPathKey = envPathKeyFor(Object.fromEntries(pathKeys.map((key) => [key, ""])), platform);
+  const orderedKeys = [envPathKey, ...pathKeys.filter((key) => key !== envPathKey)];
+  const inheritedPath = orderedKeys.reduce<string | undefined>(
+    (merged, key) => mergePathEntries(merged, env[key], platform),
+    undefined,
+  );
+  const nextEnv: NodeJS.ProcessEnv = { ...env };
+  for (const key of pathKeys) delete nextEnv[key];
+  nextEnv[envPathKey] = mergePathEntries(entry, inheritedPath, platform) ?? entry;
+  return nextEnv;
 };
 
 const UPDATE_OUTPUT_MAX_BYTES = 10_000;
